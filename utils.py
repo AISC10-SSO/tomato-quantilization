@@ -42,19 +42,25 @@ class Action(Enum):
     RIGHT = "RIGHT"
     WAIT = "WAIT"
 
+class InvalidActionSetting(Enum):
+    WAIT = "WAIT"
+    RANDOM = "RANDOM"
+    ERROR = "ERROR"
+    PASS = "PASS"
+
 class TomatoGrid:
     def __init__(
             self,
             grid_state: list[list[str]] = _initial_grid_state,
             tomato_updates: list[tuple[int, int]] = _tomato_updates_list,
             agent_position: tuple[int, int] = (3, 3),
-            invalid_equals_wait: bool = True,
+            invalid_action_setting: InvalidActionSetting = InvalidActionSetting.WAIT,
     ):
         self.grid_state = grid_state
         self.tomato_updates = tomato_updates
         self.time_step = 0
         self.agent_position = agent_position
-        self.invalid_equals_wait = invalid_equals_wait
+        self.invalid_action_setting = invalid_action_setting
 
     def get_tomato_updates(self, time_step: int) -> tuple[int, int] | None:
         return self.tomato_updates[time_step]
@@ -78,10 +84,14 @@ class TomatoGrid:
 
     def update_grid(self, action: Action):
         if action not in self.get_valid_actions():
-            if self.invalid_equals_wait:
+            if self.invalid_action_setting == InvalidActionSetting.WAIT:
                 action = Action.WAIT
-            else:
+            elif self.invalid_action_setting == InvalidActionSetting.RANDOM:
+                action = random.choice(self.get_valid_actions())
+            elif self.invalid_action_setting == InvalidActionSetting.ERROR:
                 raise ValueError(f"Invalid action: {action}")
+            elif self.invalid_action_setting == InvalidActionSetting.PASS:
+                return None
 
         if action == Action.UP:
             self.agent_position = (self.agent_position[0] - 1, self.agent_position[1])

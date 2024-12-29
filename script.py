@@ -1,114 +1,147 @@
-from utils import TomatoGrid, Action, calculate_complexity, iterative_complexity_reduction
-import random
+from utils import TomatoGrid, Action, iterative_complexity_reduction, InvalidActionSetting
 import matplotlib.pyplot as plt
 import pandas as pd
 from tqdm import tqdm
 import os
+import numpy as np
+import random
 
 def main():
 
     """
-    for iterations in [0, 1, 2, 3, 4]:
-        save_policy_datapoints(
-            datapoints_count=10000,
-            save_path=f"datapoints/datapoints_{iterations}_iterations.csv",
-            iterations=iterations)
+    save_policy_datapoints(
+        datapoints_count=10_000,
+        save_path="datapoints/no_iterations.csv",
+        iterations=0)
+
+    save_policy_datapoints(
+        datapoints_count=10_000,
+        save_path="datapoints/1_iteration.csv",
+        iterations=1)
+
+    save_policy_datapoints(
+        datapoints_count=1_000_000,
+        save_path="datapoints/1M_datapoints.csv",
+        iterations=0)
+
+    save_policy_datapoints(
+        datapoints_count=10_000,
+        save_path="datapoints/no_iterations_random_move_if_invalid.csv",
+        iterations=0,
+        invalid_action_setting=InvalidActionSetting.RANDOM)
+    
+    save_policy_datapoints(
+        datapoints_count=10_000,
+        save_path="datapoints/1_iteration_random_move_if_invalid.csv",
+        iterations=1,
+        invalid_action_setting=InvalidActionSetting.RANDOM)
     """
 
     plot_policy_datapoints(save_path="plots", data_path="datapoints")
 
 def plot_policy_datapoints(save_path: str, data_path: str):
-    iterations_list = []
-    true_utilities_list = []
-    false_utilities_list = []
 
     for file in os.listdir(data_path):
         if file.endswith(".csv"):
-            iterations = file.split("_")[1]
-            title = f"{iterations} iterations"
-            false_utility, true_utility = plot_single_policy_datapoints(
+            title = file[:-len(".csv")]
+            plot_single_policy_datapoints(
                 read_path=f"{data_path}/{file}",
-                save_path=f"{save_path}/{file}",
-                title=title,
-                penalty=0)
-            
-            false_utilities_list.append(false_utility)
-            true_utilities_list.append(true_utility)
-            iterations_list.append(int(iterations))
+                save_path=f"{save_path}/",
+                title=title)
 
-    for file in os.listdir(data_path):
-        if file.endswith(".csv"):
-            datapoints = pd.read_csv(f"{data_path}/{file}")
-            iterations = file.split("_")[1]
-            plt.scatter(datapoints["false_utility"], datapoints["true_utility"], alpha=0.1, label=f"{iterations} iterations")
-    plt.xlabel("False Utility")
-    plt.ylabel("True Utility")
-    plt.title(f"All Datapoints")
-    plt.legend()
-    plt.savefig(f"{save_path}/all_datapoints.png")
-    plt.clf()
 
-    # Sort datapoints by iterations
-    sorted_indices = sorted(range(len(iterations_list)), key=lambda k: iterations_list[k])
-    iterations_list = [iterations_list[i] for i in sorted_indices]
-    false_utilities_list = [false_utilities_list[i] for i in sorted_indices] 
-    true_utilities_list = [true_utilities_list[i] for i in sorted_indices]
+def plot_single_policy_datapoints(
+        read_path: str,
+        save_path: str,
+        title: str):
 
-    plt.plot(iterations_list, false_utilities_list, label="False Utility")
-    plt.plot(iterations_list, true_utilities_list, label="True Utility")
-    plt.xlabel("Iterations")
-    plt.ylabel("Utility")
-    plt.title("Policy Datapoints")
-    plt.legend()
-    plt.savefig(f"{save_path}/policy_datapoints.png")
-    plt.clf()
-
-def plot_single_policy_datapoints(read_path: str, save_path: str, title: str, penalty: float = 0):
     df = pd.read_csv(read_path)
     plt.scatter(df["false_utility"], df["true_utility"], alpha=0.1)
     plt.xlabel("False Utility")
     plt.ylabel("True Utility")
     plt.title(title)
-    plt.savefig(f"{save_path}.png")
+    plt.savefig(f"{save_path}/{title}_scatter.png")
 
     plt.clf()
 
-    quantiles = [0.01, 0.1, 0.25, 0.5, 0.75, 0.9, 0.99]
+    # 10 datapoint quantile
+    ten_datapoint_quantile_log = int(np.log10(len(df)/10))
 
-    # Complexity is compression ratio, so penalty should be - 1/complexity
-    df["complexity_penalty"] = -1 / df["complexity"] * penalty
-    df["penalized_false_utility"] = df["false_utility"] + df["complexity_penalty"]
+    quantiles = [1] + [
+        x * 10**(-i)
+        for i in range(1,ten_datapoint_quantile_log)
+        for x in [0.5, 0.2, 0.1]
+    ]
 
     quantile_true_utilities = []
     quantile_false_utilities = []
 
+    df_sorted = df.sort_values(by="false_utility", ascending=False)
+
     for q in quantiles:
-        quantile_true_utilities.append(df["true_utility"].quantile(q))
-        quantile_false_utilities.append(df["penalized_false_utility"].quantile(q))
+        quantile_true_utilities.append(df_sorted["true_utility"].iloc[:int(q * len(df))].mean())
+        quantile_false_utilities.append(df_sorted["false_utility"].iloc[:int(q * len(df))].mean())
 
     plt.plot(quantiles, quantile_true_utilities, label="True Utility")
     plt.plot(quantiles, quantile_false_utilities, label="False Utility")
     plt.xlabel("Quantile")
     plt.ylabel("Utility")
+    plt.xscale("log")
+    plt.gca().invert_xaxis()
     plt.title(title)
     plt.legend()
-    plt.savefig(f"{save_path}_{title}_quantiles.png")
+    plt.savefig(f"{save_path}/{title}_quantiles.png")
+    plt.clf()
+
+    df["false_utility_normalized"] = ((df["false_utility"] - np.mean(df["false_utility"])) / np.std(df["false_utility"]))
+
+    b_values = [
+        x * 0.25 for x in range(1, 8 + ten_datapoint_quantile_log*2)
+    ]
+
+    b_true_utilities = []
+    b_false_utilities = []
+    kl_divergences = []
+
+    for b in b_values:
+        df["weights"] = np.exp(b * df["false_utility_normalized"])
+        df["weights"] = df["weights"] / np.sum(df["weights"])
+        df["weighted_true_utility"] = df["true_utility"] * df["weights"] 
+        df["weighted_false_utility"] = df["false_utility"] * df["weights"]
+
+        b_true_utilities.append(df["weighted_true_utility"].sum())
+        b_false_utilities.append(df["weighted_false_utility"].sum())
+
+        kl_divergence = np.sum(df["weights"] * (np.log(df["weights"]))) - np.log(1/len(df))
+        kl_divergences.append(kl_divergence)
+
+    plt.plot(kl_divergences, b_true_utilities, label="True Utility")
+    plt.plot(kl_divergences, b_false_utilities, label="False Utility")
+    plt.xlabel("KL Divergence")
+    plt.ylabel("Utility")
+    plt.title(title)
+    plt.legend()
+    plt.savefig(f"{save_path}/{title}_kl_divergence.png")
     plt.clf()
 
     return quantile_true_utilities[-1], quantile_false_utilities[-1]
 
-def save_policy_datapoints(datapoints_count: int = 10000, save_path: str = "datapoints.csv", iterations: int = 0):
+def save_policy_datapoints(
+        datapoints_count: int = 10000,
+        save_path: str = "datapoints.csv",
+        iterations: int = 0,
+        invalid_action_setting: InvalidActionSetting = InvalidActionSetting.WAIT):
 
     datapoints = []
     for _ in tqdm(range(datapoints_count)):
-        true_utility, false_utility, complexity = sample_random_policy(iterations=iterations)
+        true_utility, false_utility, complexity = sample_random_policy(iterations=iterations, invalid_action_setting=invalid_action_setting)
         datapoints.append((true_utility, false_utility, complexity))
 
     df = pd.DataFrame(datapoints, columns=["true_utility", "false_utility", "complexity"])
     df.to_csv(save_path, index=False)
 
-def sample_random_policy(steps: int = 1000, iterations: int = 0):
-    grid = TomatoGrid()
+def sample_random_policy(steps: int = 1000, iterations: int = 0, invalid_action_setting: InvalidActionSetting = InvalidActionSetting.WAIT):
+    grid = TomatoGrid(invalid_action_setting=invalid_action_setting)
 
     total_true_utility = 0
     total_false_utility = 0
