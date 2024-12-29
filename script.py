@@ -56,8 +56,8 @@ def plot_single_policy_datapoints(
         title: str):
 
     df = pd.read_csv(read_path)
-    plt.scatter(df["false_utility"], df["true_utility"], alpha=0.1)
-    plt.xlabel("False Utility")
+    plt.scatter(df["misspecified_reward"], df["true_utility"], alpha=0.1)
+    plt.xlabel("Misspecified Reward")
     plt.ylabel("True Utility")
     plt.title(title)
     plt.savefig(f"{save_path}/{title}_scatter.png")
@@ -76,14 +76,14 @@ def plot_single_policy_datapoints(
     quantile_true_utilities = []
     quantile_false_utilities = []
 
-    df_sorted = df.sort_values(by="false_utility", ascending=False)
+    df_sorted = df.sort_values(by="misspecified_reward", ascending=False)
 
     for q in quantiles:
         quantile_true_utilities.append(df_sorted["true_utility"].iloc[:int(q * len(df))].mean())
-        quantile_false_utilities.append(df_sorted["false_utility"].iloc[:int(q * len(df))].mean())
+        quantile_false_utilities.append(df_sorted["misspecified_reward"].iloc[:int(q * len(df))].mean())
 
     plt.plot(quantiles, quantile_true_utilities, label="True Utility")
-    plt.plot(quantiles, quantile_false_utilities, label="False Utility")
+    plt.plot(quantiles, quantile_false_utilities, label="Misspecified Reward")
     plt.xlabel("Quantile")
     plt.ylabel("Utility")
     plt.xscale("log")
@@ -93,7 +93,7 @@ def plot_single_policy_datapoints(
     plt.savefig(f"{save_path}/{title}_quantiles.png")
     plt.clf()
 
-    df["false_utility_normalized"] = ((df["false_utility"] - np.mean(df["false_utility"])) / np.std(df["false_utility"]))
+    df["misspecified_reward_normalized"] = ((df["misspecified_reward"] - np.mean(df["misspecified_reward"])) / np.std(df["misspecified_reward"]))
 
     b_values = [
         x * 0.25 for x in range(1, 8 + ten_datapoint_quantile_log*2)
@@ -101,23 +101,23 @@ def plot_single_policy_datapoints(
 
     b_true_utilities = []
     b_false_utilities = []
-    kl_divergences = []
+    sqrt_kl_divergences = []
 
     for b in b_values:
-        df["weights"] = np.exp(b * df["false_utility_normalized"])
+        df["weights"] = np.exp(b * df["misspecified_reward_normalized"])
         df["weights"] = df["weights"] / np.sum(df["weights"])
         df["weighted_true_utility"] = df["true_utility"] * df["weights"] 
-        df["weighted_false_utility"] = df["false_utility"] * df["weights"]
+        df["weighted_misspecified_reward"] = df["misspecified_reward"] * df["weights"]
 
         b_true_utilities.append(df["weighted_true_utility"].sum())
-        b_false_utilities.append(df["weighted_false_utility"].sum())
+        b_false_utilities.append(df["weighted_misspecified_reward"].sum())
 
         kl_divergence = np.sum(df["weights"] * (np.log(df["weights"]))) - np.log(1/len(df))
-        kl_divergences.append(kl_divergence)
+        sqrt_kl_divergences.append(np.sqrt(kl_divergence))
 
-    plt.plot(kl_divergences, b_true_utilities, label="True Utility")
-    plt.plot(kl_divergences, b_false_utilities, label="False Utility")
-    plt.xlabel("KL Divergence")
+    plt.plot(sqrt_kl_divergences, b_true_utilities, label="True Utility")
+    plt.plot(sqrt_kl_divergences, b_false_utilities, label="Misspecified Reward")
+    plt.xlabel("sqrt(KL Divergence)")
     plt.ylabel("Utility")
     plt.title(title)
     plt.legend()
@@ -134,36 +134,36 @@ def save_policy_datapoints(
 
     datapoints = []
     for _ in tqdm(range(datapoints_count)):
-        true_utility, false_utility, complexity = sample_random_policy(iterations=iterations, invalid_action_setting=invalid_action_setting)
-        datapoints.append((true_utility, false_utility, complexity))
+        true_utility, misspecified_reward, complexity = sample_random_policy(iterations=iterations, invalid_action_setting=invalid_action_setting)
+        datapoints.append((true_utility, misspecified_reward, complexity))
 
-    df = pd.DataFrame(datapoints, columns=["true_utility", "false_utility", "complexity"])
+    df = pd.DataFrame(datapoints, columns=["true_utility", "misspecified_reward", "complexity"])
     df.to_csv(save_path, index=False)
 
 def sample_random_policy(steps: int = 1000, iterations: int = 0, invalid_action_setting: InvalidActionSetting = InvalidActionSetting.WAIT):
     grid = TomatoGrid(invalid_action_setting=invalid_action_setting)
 
     total_true_utility = 0
-    total_false_utility = 0
+    total_misspecified_reward = 0
 
     if iterations > 0:
         sequence, complexity = iterative_complexity_reduction(length=steps, iterations=iterations)
         for action in sequence:
             grid.update_grid(Action(action))
             total_true_utility += grid.get_current_utility()[0]
-            total_false_utility += grid.get_current_utility()[1]
+            total_misspecified_reward += grid.get_current_utility()[1]
     else:
         complexity = 1
         for _ in range(steps):
             action = random.choice(list(Action))
             grid.update_grid(action)
             total_true_utility += grid.get_current_utility()[0]
-            total_false_utility += grid.get_current_utility()[1]
+            total_misspecified_reward += grid.get_current_utility()[1]
 
     average_true_utility = total_true_utility / steps
-    average_false_utility = total_false_utility / steps
+    average_misspecified_reward = total_misspecified_reward / steps
 
-    return average_true_utility, average_false_utility, complexity
+    return average_true_utility, average_misspecified_reward, complexity
 
 
 if __name__ == "__main__":

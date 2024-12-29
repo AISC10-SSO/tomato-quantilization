@@ -1,4 +1,4 @@
-true_utility,false_utility,complexity
+true_utility,misspecified_reward,complexity
 3.756,4.278,0.777
 4.388,4.595,0.786
 2.102,5.784,0.762
