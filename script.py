@@ -131,6 +131,7 @@ def plot_single_policy_datapoints(
     df["misspecified_reward_normalized"] = ((df["misspecified_reward"] - np.mean(df["misspecified_reward"])) / np.std(df["misspecified_reward"]))
     df["steps_on_tomato_normalized"] = ((df["steps_on_tomato"] - np.mean(df["steps_on_tomato"])) / np.std(df["steps_on_tomato"]))
 
+    """
     sqrt_kl_divergences = []
     true_utilities = []
     names = []
@@ -171,6 +172,45 @@ def plot_single_policy_datapoints(
     plt.title(title)
     plt.savefig(f"{save_path}/{title}/sqrt_kl_divergences.png")
     plt.clf()
+    """
+
+    true_utilities = []
+    names = []
+
+    for w in weight_values:
+        df["weighted_mix"] = df["misspecified_reward"] * w + df["steps_on_tomato"] * (1 - w)
+        df_sorted = df.sort_values(by="weighted_mix", ascending=False)
+        true_utilities_for_weights = []
+    
+        names.append(f"{w*10:.0f}:{10-w*10:.0f}")
+
+        for q in quantiles:
+            true_utilities_for_weights.append(df_sorted["true_utility"].iloc[:int(q * len(df))].mean())
+
+        true_utilities.append(true_utilities_for_weights)
+
+    for i in range(len(weight_values)):
+        plt.plot(quantiles, true_utilities[i], c=plt.cm.viridis(weight_values[i]))
+
+    # Create a new figure and axes for the colorbar
+    fig = plt.gcf()
+    ax = plt.gca()
+    
+    norm = plt.Normalize(0, 1)
+    sm = plt.cm.ScalarMappable(cmap=plt.cm.viridis, norm=norm)
+    # Pass the ax argument to colorbar
+    cbar = plt.colorbar(sm, ax=ax)
+    cbar.set_ticks([0, 1])
+    cbar.set_ticklabels(["Only steps_on_tomato", "Only misspecified_reward"])
+
+    plt.xlabel("Quantile")
+    plt.ylabel("True Utility")
+    plt.xscale("log")
+    plt.gca().invert_xaxis()
+    plt.title(title)
+    plt.savefig(f"{save_path}/{title}/mixed_quantilization.png", bbox_inches="tight")
+    plt.clf()
+
 
 def save_policy_datapoints(
         datapoints_count: int = 10000,
