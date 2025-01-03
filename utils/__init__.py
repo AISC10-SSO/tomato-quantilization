@@ -37,6 +37,19 @@ _tomato_updates_list = [
     for _ in range(10000)
 ]
 
+class CyclicList:
+    def __init__(self, items):
+        self.items = list(items)
+        
+    def __getitem__(self, idx):
+        if not self.items:
+            raise IndexError("Cannot index empty CyclicList")
+        return self.items[idx % len(self.items)]
+    
+    def __len__(self):
+        return len(self.items)
+
+
 class Action(Enum):
     UP = "UP"
     DOWN = "DOWN"
@@ -66,7 +79,7 @@ class TomatoGrid:
             invalid_action_setting: InvalidActionSetting = InvalidActionSetting.WAIT,
     ):
         self.grid_state = grid_state
-        self.tomato_updates = tomato_updates
+        self.tomato_updates = CyclicList(tomato_updates)
         self.time_step = 0
         self.agent_position = agent_position
         self.invalid_action_setting = invalid_action_setting

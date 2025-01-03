@@ -15,12 +15,10 @@ class QLearning:
 
         self.config = config
         self.state_buffer = StateBuffer(self.config["buffer_size"])
-        self.gridworld_config = gridworld_config
-        self.config["gamma"] = (1-1/(self.config["buffer_size"]))
-        print(self.config["gamma"])
-        self.config["buffer_size"] = self.config["buffer_size"]
 
-        self.q_agent = QAgent(reward_cap = self.config["reward_cap"], gamma = self.config["gamma"], **q_agent_config)
+        self.gridworld_config = gridworld_config
+
+        self.q_agent = QAgent(**q_agent_config)
 
         self.optimizer = AdamW(self.q_agent.network.parameters(), **adamw_config)
 
@@ -34,7 +32,7 @@ class QLearning:
 
         outputs = []
 
-        for _ in range(steps):
+        for step_idx in range(steps):
             dict_ = {}
             
             state = gridworld.get_state_tensor()
@@ -52,8 +50,8 @@ class QLearning:
             output = gridworld.update_grid(action)
             dict_["reward"] = torch.tensor(output.misspecified_reward)/13
             self.state_buffer.add(dict_)
-        
-            if len(self.state_buffer) == self.config["buffer_size"]:
+
+            if step_idx % 10 == 0 and step_idx > 0:
                 loss_output = self.q_agent.get_loss(self.state_buffer.get_batch(), beta=self.beta)
 
                 self.optimizer.zero_grad()
@@ -61,22 +59,26 @@ class QLearning:
                 loss.backward()
                 self.optimizer.step()
 
+                if self.beta < 5:
+                    self.beta += 0.001
+
             print(output.misspecified_reward)
 
             outputs.append(output)
 
-            if self.beta < 10:
-                self.beta += 0.1
-
 
 if __name__ == "__main__":
     config = {
-        "buffer_size": 100,
+        "buffer_size": 1000,
         "reward_cap": 1,
     }
     adamw_config = {
         "lr": 1e-2,
         "weight_decay": 1e-5
     }
+    q_agent_config = {
+        "gamma": 0.9,
+        "reward_cap": 1
+    }
     q_learning = QLearning(config=config, adamw_config=adamw_config)
-    q_learning.train(steps=1000)
+    q_learning.train(steps=100000)
