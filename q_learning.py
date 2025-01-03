@@ -16,7 +16,8 @@ class QLearning:
         self.config = config
         self.state_buffer = StateBuffer(self.config["buffer_size"])
         self.gridworld_config = gridworld_config
-        self.config["gamma"] = (1-3/(self.config["buffer_size"]))
+        self.config["gamma"] = (1-1/(self.config["buffer_size"]))
+        print(self.config["gamma"])
         self.config["buffer_size"] = self.config["buffer_size"]
 
         self.q_agent = QAgent(reward_cap = self.config["reward_cap"], gamma = self.config["gamma"], **q_agent_config)
@@ -60,9 +61,9 @@ class QLearning:
                 loss.backward()
                 self.optimizer.step()
 
-            outputs.append(output)
-
             print(output.misspecified_reward)
+
+            outputs.append(output)
 
             if self.beta < 10:
                 self.beta += 0.1
@@ -78,4 +79,4 @@ if __name__ == "__main__":
         "weight_decay": 1e-5
     }
     q_learning = QLearning(config=config, adamw_config=adamw_config)
-    q_learning.train(steps=10000)
+    q_learning.train(steps=1000)

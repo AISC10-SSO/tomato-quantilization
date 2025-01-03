@@ -12,22 +12,10 @@ class QNetwork(nn.Module):
         """
         super().__init__()
 
-        self.grid_size = 6*9
-        self.input_channels = input_channels
-        self.d_res = 32
-
-        self.W_in = nn.Linear(self.grid_size * input_channels, self.d_res)
-
-        self.layers = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(self.d_res, self.d_res * 4),
-                nn.GELU(),
-                nn.Linear(self.d_res * 4, self.d_res)
-            )
-            for _ in range(3)
-        ])
-        
-        self.W_out = nn.Linear(self.d_res, action_size)
+        self.conv1 = nn.Conv2d(input_channels, 16, kernel_size=3, stride=1)
+        self.conv2 = nn.Conv2d(16, 32, kernel_size=3, stride=1)
+        self.fc1 = nn.Linear(32, 256)
+        self.fc2 = nn.Linear(256, action_size)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -40,10 +28,11 @@ class QNetwork(nn.Module):
             torch.Tensor: Output tensor of shape (batch_size, action_size)
 
         """
-        x = F.relu(self.W_in(x.flatten(start_dim=1)))
-        for layer in self.layers:
-            x =  x + F.relu(layer(x))
-        return self.W_out(x)
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = x.mean(dim=(-2,-1))
+        x = F.relu(self.fc1(x))
+        return self.fc2(x)
     
 class QAgent:
     def __init__(self, input_channels: int = 6, action_size: int = 5, gamma: float = 0.99, reward_cap: float = 1):
@@ -86,18 +75,16 @@ class QAgent:
         
         # Now get the predicted rewards for the actions that were actually taken
         # Then compare to the rewards that were received for that action, plus predicted future rewards, times gamma
-        predicted_rewards = outputs[torch.arange(outputs.size(0)), data["action"]][1:]
+        predicted_rewards = outputs[torch.arange(outputs.size(0)), data["action"]][:-1]
 
+        # Target = reward from that step + gamma times the predicted future rewards
         target_rewards = data["reward"][:-1] + self.gamma * predicted_values
 
         # Calculate kl divergence between probabilities and uniform distribution
         # This will be used to restrict the beta value in future
-        kl_divergence = F.kl_div(
-            probabilities,
-            F.softmax(invalid_actions_mask, dim=1),
-            reduction="batchmean")
-    
-    
+        base_probabilities = F.softmax(invalid_actions_mask, dim=1)
+        probabilities_ratio = base_probabilities / (probabilities + 1e-9) + 1e-9
+        kl_divergence = torch.sum(base_probabilities * torch.log(probabilities_ratio), dim=-1).mean()
 
         loss = F.mse_loss(predicted_rewards, target_rewards)
         return {"loss": loss,
