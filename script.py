@@ -75,7 +75,7 @@ def plot_single_policy_datapoints(
 
     quantiles = [1] + [
         x * 10**(-i)
-        for i in range(1,ten_datapoint_quantile_log)
+        for i in range(ten_datapoint_quantile_log)
         for x in [0.5, 0.2, 0.1]
     ]
 
@@ -131,49 +131,6 @@ def plot_single_policy_datapoints(
     df["misspecified_reward_normalized"] = ((df["misspecified_reward"] - np.mean(df["misspecified_reward"])) / np.std(df["misspecified_reward"]))
     df["steps_on_tomato_normalized"] = ((df["steps_on_tomato"] - np.mean(df["steps_on_tomato"])) / np.std(df["steps_on_tomato"]))
 
-    """
-    sqrt_kl_divergences = []
-    true_utilities = []
-    names = []
-
-    for weight in weight_values:
-        sqrt_kl_divergences_for_weight = []
-        true_utilities_for_weight = []
-
-        for b in np.arange(0, 100, 0.2):
-            df["weights"] = 1
-
-            b_misspecified_reward = b * weight
-            b_steps_on_tomato = b * (1 - weight)
-
-            df["weights"] *= np.exp(b_misspecified_reward * df["misspecified_reward_normalized"])
-            df["weights"] *= np.exp(b_steps_on_tomato * df["steps_on_tomato_normalized"])
-
-            df["weights"] = df["weights"] / np.sum(df["weights"])
-
-            kl_divergence = np.sum(df["weights"] * np.log(df["weights"])) + np.log(len(df))
-
-            sqrt_kl_divergences_for_weight.append(np.sqrt(kl_divergence))
-            true_utilities_for_weight.append(np.sum(df["true_utility"] * df["weights"]))
-
-            if kl_divergence > 10:
-                break
-
-        sqrt_kl_divergences.append(sqrt_kl_divergences_for_weight)
-        true_utilities.append(true_utilities_for_weight)
-        names.append(f"{weight*10:.0f}:{10-weight*10:.0f}")
-
-
-    for i in range(len(weight_values)):
-        plt.plot(sqrt_kl_divergences[i], true_utilities[i], label=names[i], c=plt.cm.viridis(weight_values[i]))
-    plt.xlabel("Sqrt KL Divergence")
-    plt.ylabel("True Utility")
-    plt.legend()
-    plt.title(title)
-    plt.savefig(f"{save_path}/{title}/sqrt_kl_divergences.png")
-    plt.clf()
-    """
-
     true_utilities = []
     names = []
 
@@ -211,6 +168,27 @@ def plot_single_policy_datapoints(
     plt.savefig(f"{save_path}/{title}/mixed_quantilization.png", bbox_inches="tight")
     plt.clf()
 
+    true_utilities = np.zeros((len(quantiles), len(quantiles)))
+    for tomato_q_index, tomato_q in enumerate(quantiles):
+        for reward_q_index, reward_q in enumerate(quantiles):
+            df_sorted = df.sort_values(by="misspecified_reward", ascending=False)
+            df_quantilized = df_sorted.iloc[:int(reward_q * len(df))]
+            df_quantilized_sorted = df_quantilized.sort_values(by="steps_on_tomato", ascending=False)
+            df_twice_quantilized = df_quantilized_sorted.iloc[:int(tomato_q * len(df_quantilized))]
+            if len(df_twice_quantilized) >= 10:
+                true_utilities[reward_q_index, tomato_q_index] = df_twice_quantilized["true_utility"].mean()
+            else:
+                true_utilities[reward_q_index, tomato_q_index] = np.nan
+
+    plt.imshow(true_utilities[::-1], cmap=plt.cm.magma, aspect="auto")
+    plt.xlabel("Tomato Steps Quantile")
+    plt.xticks(range(len(quantiles)), [f"{q:.1g}" for q in quantiles])
+    plt.ylabel("Misspecified Reward Quantile")
+    plt.yticks(range(len(quantiles)), [f"{q:.1g}" for q in quantiles[::-1]])
+    plt.title(f"{title} - True Utility Heatmap")
+    plt.colorbar()
+    plt.savefig(f"{save_path}/{title}/true_utility_heatmap.png")
+    plt.clf()
 
 def save_policy_datapoints(
         datapoints_count: int = 10000,
