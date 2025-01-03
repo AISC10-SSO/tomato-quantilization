@@ -6,27 +6,29 @@ import os
 import numpy as np
 import random
 
+PATH = "Random Policy Testing"
+
 def main():
 
     save_policy_datapoints(
         datapoints_count=10_000,
-        save_path="datapoints/random_prior_wait_if_invalid.csv",
+        save_path=f"{PATH}/datapoints/random_prior_wait_if_invalid.csv",
         iterations=0)
 
     save_policy_datapoints(
         datapoints_count=10_000,
-        save_path="datapoints/simplicity_prior_wait_if_invalid.csv",
+        save_path=f"{PATH}/datapoints/simplicity_prior_wait_if_invalid.csv",
         iterations=1)
 
     save_policy_datapoints(
         datapoints_count=10_000,
-        save_path="datapoints/random_prior_random_move_if_invalid.csv",
+        save_path=f"{PATH}/datapoints/random_prior_random_move_if_invalid.csv",
         iterations=0,
         invalid_action_setting=InvalidActionSetting.RANDOM)
     
     save_policy_datapoints(
         datapoints_count=10_000,
-        save_path="datapoints/simplicity_prior_random_move_if_invalid.csv",
+        save_path=f"{PATH}/datapoints/simplicity_prior_random_move_if_invalid.csv",
         iterations=1,
         invalid_action_setting=InvalidActionSetting.RANDOM)
 
@@ -37,7 +39,7 @@ def main():
         iterations=0)
     """
 
-    plot_policy_datapoints(save_path="plots", data_path="datapoints")
+    plot_policy_datapoints(save_path=f"{PATH}/plots", data_path=f"{PATH}/datapoints")
 
 def plot_policy_datapoints(save_path: str, data_path: str):
 
