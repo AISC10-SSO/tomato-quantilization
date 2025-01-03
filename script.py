@@ -231,7 +231,7 @@ def save_policy_datapoints(
 
     return
 
-def sample_random_policy(steps: int = 1000, iterations: int = 0, invalid_action_setting: InvalidActionSetting = InvalidActionSetting.WAIT):
+def sample_random_policy(steps: int = 100, iterations: int = 0, invalid_action_setting: InvalidActionSetting = InvalidActionSetting.WAIT):
     grid = TomatoGrid(invalid_action_setting=invalid_action_setting)
 
     total_true_utility = 0
