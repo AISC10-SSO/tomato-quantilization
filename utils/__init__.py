@@ -2,6 +2,7 @@
 from enum import Enum
 import random
 from dataclasses import dataclass
+import torch
 
 _initial_grid_state = [
     ["W", "W", "W", "W", "W", "W", "W", "W", "W"],
@@ -143,6 +144,43 @@ class TomatoGrid:
             misspecified_reward = 13
 
         return {"true_utility": true_utility, "misspecified_reward": misspecified_reward}
+    
+    def get_state_tensor(self) -> torch.Tensor:
+        """
+        Convert a grid state to a tensor
+
+        Returns:
+            torch.Tensor: The tensor representation of the grid state
+
+        Size of tensor is (height, width, channels)
+        Channels are:
+        wall (W)
+        unwatered_tomato (t)
+        watered_tomato (T)
+        bucket (O)
+        empty (X)
+        agent (A)
+        """
+        output = torch.zeros(
+            (len(self.grid_state), len(self.grid_state[0]), 6)
+        )
+
+        channel_map = {
+            "W": 0,
+            "t": 1,
+            "T": 2,
+            "O": 3,
+            "X": 4
+        }
+
+        for i, row in enumerate(self.grid_state):
+            for j, cell in enumerate(row):
+                output[i, j, channel_map[cell]] = 1
+
+        output[self.agent_position[0], self.agent_position[1], 5] = 1
+
+        return output
+
 
 def lzw_compress(sequence):
     """
