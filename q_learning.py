@@ -1,5 +1,6 @@
 import torch
 from torch.optim import AdamW
+from enum import Enum
 
 from utils.learning import QAgent, StateBuffer
 from utils import TomatoGrid, Action
