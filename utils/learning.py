@@ -131,7 +131,12 @@ class QAgent:
         probabilities = self.beta_softmax(outputs, beta=self.beta_sample, action_validity=action_validity)
         # Choose randomly
 
-        return torch.multinomial(probabilities, 1).item()
+        try:
+            return torch.multinomial(probabilities, 1).item()
+        except Exception as e:
+            logger.warning(f"Error getting action: {e}")
+            logger.warning(f"Probabilities: {probabilities}")
+            return torch.argmax(probabilities, dim=-1).item()
     
     def update_target_network(self, tau: float):
         """
@@ -159,19 +164,24 @@ class QAgent:
         Returns:
             torch.Tensor: Probabilities of shape (batch_size, action_size)
         """
+
+        # Mask out invalid actions
+        if action_validity is not None:
+            outputs = outputs + (~action_validity).float() * -1e9
+
+        # Apply temperature scaling if beta is provided
         if beta is not None:
             probabilities = F.softmax(outputs * beta, dim=-1)
         else:
             probabilities = torch.zeros_like(outputs)
             probabilities[torch.arange(outputs.shape[0]), torch.argmax(outputs, dim=-1)] = 1
 
-        if action_validity is not None:
-            probabilities = probabilities + (~action_validity).float() * -1e9
-
+        # Clamp negative probabilities
         if probabilities.max() < 0:
             logger.warning("Negative probability detected")
             probabilities = probabilities.clamp(min=0)
 
+        # Clamp NaN or inf probabilities
         if probabilities.isnan().any() or probabilities.isinf().any():
             logger.warning("NaN or inf probability detected")
             probabilities = torch.ones_like(probabilities)
@@ -195,12 +205,15 @@ class StateBuffer:
             raise ValueError("Not enough data in buffer to get a batch")
         
         batch = random.sample(self.buffers, self.batch_size)
+        # Convert list of dicts to dict of lists
+        batch_dict = {}
+        for key in batch[0].keys():
+            batch_dict[key] = torch.stack([d[key] for d in batch])
 
-        return {k: torch.stack(list(v)) for k, v in batch.items()}
+        return batch_dict
     
     def __len__(self):
-        return len(self.buffers["state"])
+        return len(self.buffers)
     
     def clear(self):
-        for buffer in self.buffers.values():
-            buffer.clear()
+        self.buffers.clear()

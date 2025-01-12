@@ -66,6 +66,7 @@ class QLearning:
                     pass
 
 
+
 if __name__ == "__main__":
     config = {
         "buffer_size": 100000,
