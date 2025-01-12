@@ -32,6 +32,8 @@ _tomato_locations = [
 prob_tomato = min(1.0, 3 * len(_tomato_locations) / 100)
 
 # Generate list of updates - None if no tomato chosen, otherwise random tomato location
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 
 def make_random_tomato_updates(grid_state: list[list[str]]) -> list[tuple[int, int]]:
     return [
@@ -161,7 +163,7 @@ class TomatoGrid:
                     true_utility += 1
 
         if self.grid_state[self.agent_position[0]][self.agent_position[1]] == "O":
-            misspecified_reward = 20
+            misspecified_reward = self.misspecified_reward
 
         return {"true_utility": true_utility, "misspecified_reward": misspecified_reward}
     
