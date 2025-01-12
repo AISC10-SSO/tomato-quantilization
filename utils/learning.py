@@ -2,6 +2,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from collections import deque
+import random
+import logging
+
+logger = logging.getLogger(__name__)
 
 class QNetwork(nn.Module):
 
@@ -78,10 +82,7 @@ class QAgent:
         invalid_actions_mask = (~data["action_validity"]).float() * -1e9
         outputs = self.network(data["state"]) + invalid_actions_mask
 
-        if self.beta_sample is not None:
-            probabilities = F.softmax(outputs * self.beta_sample, dim=1)
-        else:
-            probabilities = torch.max(outputs, dim=-1)
+        probabilities = self.beta_softmax(outputs, beta=self.beta_sample, action_validity=data["action_validity"])
         
         # Use target network with temperature scaling
         with torch.no_grad():
@@ -129,7 +130,21 @@ class QAgent:
         outputs = self.network(state)
         probabilities = self.beta_softmax(outputs, beta=self.beta_sample, action_validity=action_validity)
         # Choose randomly
+
         return torch.multinomial(probabilities, 1).item()
+    
+    def update_target_network(self, tau: float):
+        """
+        Update the target network with exponential moving average, using the current network's parameters
+
+        Args:
+            tau (float): Tau value for the exponential moving average
+        """
+
+        new_state_dict = self.network.state_dict()
+        for name, param in new_state_dict.items():
+            self.target_network.state_dict()[name].copy_(
+                self.target_network.state_dict()[name] * (1-tau) + param * tau)
         
     @classmethod
     def beta_softmax(cls, outputs: torch.Tensor, beta: float|None = None, action_validity: torch.Tensor|None = None):
@@ -147,30 +162,41 @@ class QAgent:
         if beta is not None:
             probabilities = F.softmax(outputs * beta, dim=-1)
         else:
-            probabilities = torch.max(outputs, dim=-1)
+            probabilities = torch.zeros_like(outputs)
+            probabilities[torch.arange(outputs.shape[0]), torch.argmax(outputs, dim=-1)] = 1
 
         if action_validity is not None:
             probabilities = probabilities + (~action_validity).float() * -1e9
 
+        if probabilities.max() < 0:
+            logger.warning("Negative probability detected")
+            probabilities = probabilities.clamp(min=0)
+
+        if probabilities.isnan().any() or probabilities.isinf().any():
+            logger.warning("NaN or inf probability detected")
+            probabilities = torch.ones_like(probabilities)
+
+
         return probabilities
 
 class StateBuffer:
-    def __init__(self, buffer_size: int):
+    def __init__(self, buffer_size: int, batch_size: int):
         self.buffer_size = buffer_size
+        self.batch_size = batch_size
 
-        self.buffers: dict[str, deque] = {
-            "state": deque(maxlen=buffer_size),
-            "action": deque(maxlen=buffer_size),
-            "reward": deque(maxlen=buffer_size),
-            "action_validity": deque(maxlen=buffer_size),
-        }
+        self.buffers: deque[dict[str, torch.Tensor]] = deque(maxlen=buffer_size)
 
     def add(self, data: dict[str, torch.Tensor]):
-        for key, value in data.items():
-            self.buffers[key].append(value)
+        self.buffers.append(data)
 
     def get_batch(self) -> dict[str, torch.Tensor]:
-        return {k: torch.stack(list(v)) for k, v in self.buffers.items()}
+
+        if len(self.buffers) < self.batch_size:
+            raise ValueError("Not enough data in buffer to get a batch")
+        
+        batch = random.sample(self.buffers, self.batch_size)
+
+        return {k: torch.stack(list(v)) for k, v in batch.items()}
     
     def __len__(self):
         return len(self.buffers["state"])
