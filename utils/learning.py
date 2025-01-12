@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from collections import deque
 import random
 import logging
+from typing import Literal
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,7 @@ class QAgent:
             gamma: float = 0.99,
             beta_train: float|None = None,
             beta_sample: float|None = None,
+            beta_deploy: float|None = None,
             reward_cap: float|None = None):
 
         self.input_channels = input_channels
@@ -57,6 +59,7 @@ class QAgent:
         self.gamma = gamma
         self.beta_train = beta_train
         self.beta_sample = beta_sample
+        self.beta_deploy = beta_deploy
 
         self.q_cap = None if reward_cap is None else (1/(1-gamma)) * reward_cap
 
@@ -80,18 +83,22 @@ class QAgent:
         # This means taking the probabilities of each action and multiplying them by the predicted rewards (Q values)
         # Throw away the first state as we don't know what came before it
         invalid_actions_mask = (~data["action_validity"]).float() * -1e9
+        next_state_invalid_actions_mask = (~data["next_state_action_validity"]).float() * -1e9
         outputs = self.network(data["state"]) + invalid_actions_mask
 
-        probabilities = self.beta_softmax(outputs, beta=self.beta_sample, action_validity=data["action_validity"])
+        probabilities = self.beta_softmax(outputs, mode="sample", action_validity=data["action_validity"])
         
         # Use target network with temperature scaling
         with torch.no_grad():
-            next_q_values = self.target_network(data["next_state"]) + invalid_actions_mask
-            next_q_values_capped = next_q_values.clamp(max=self.q_cap)
+            next_q_values = self.target_network(data["next_state"]) + next_state_invalid_actions_mask
+            if self.q_cap is not None:
+                next_q_values_capped = next_q_values.clamp(max=self.q_cap)
+            else:
+                next_q_values_capped = next_q_values
 
             next_probabilities = self.beta_softmax(
                 next_q_values,
-                beta=self.beta_train,
+                mode="train",
                 action_validity=data["action_validity"])
             
             next_values = torch.einsum("ba,ba->b", next_probabilities, next_q_values_capped)
@@ -110,13 +117,14 @@ class QAgent:
             "loss": loss,
             "outputs": outputs,
             "probabilities": probabilities,
-            "kl_divergence": kl_divergence
+            "kl_divergence": kl_divergence,
         }
     
     def get_action(
             self, *,
             state: torch.Tensor,
-            action_validity: torch.Tensor|None = None) -> int:
+            action_validity: torch.Tensor|None = None,
+            mode: Literal["sample", "deploy"] = "sample") -> int:
         """
         Get the action to take from the network
 
@@ -128,15 +136,20 @@ class QAgent:
             int: Action to take
         """
         outputs = self.network(state)
-        probabilities = self.beta_softmax(outputs, beta=self.beta_sample, action_validity=action_validity)
+        probabilities = self.beta_softmax(outputs, mode=mode, action_validity=action_validity)
         # Choose randomly
 
         try:
-            return torch.multinomial(probabilities, 1).item()
+            output =  torch.multinomial(probabilities, 1)
         except Exception as e:
             logger.warning(f"Error getting action: {e}")
             logger.warning(f"Probabilities: {probabilities}")
-            return torch.argmax(probabilities, dim=-1).item()
+            output = torch.argmax(probabilities, dim=-1)
+
+        if output.shape[0] == 1:
+            return output.item()
+        else:
+            return output.flatten().tolist()
     
     def update_target_network(self, tau: float):
         """
@@ -151,14 +164,13 @@ class QAgent:
             self.target_network.state_dict()[name].copy_(
                 self.target_network.state_dict()[name] * (1-tau) + param * tau)
         
-    @classmethod
-    def beta_softmax(cls, outputs: torch.Tensor, beta: float|None = None, action_validity: torch.Tensor|None = None):
+    def beta_softmax(self, outputs: torch.Tensor, mode: Literal["sample", "train", "deploy"], action_validity: torch.Tensor|None = None):
         """
         Softmax with beta scaling
 
         Args:
             outputs (torch.Tensor): Outputs from the network of shape (batch_size, action_size)
-            beta (float|None): Beta value for the temperature scaling
+            mode (Literal["sample", "train", "deploy"]): Mode to use for the softmax
             action_validity (torch.Tensor|None): Action validity mask of shape (batch_size, action_size)
 
         Returns:
@@ -166,6 +178,13 @@ class QAgent:
         """
 
         # Mask out invalid actions
+        if mode == "sample":
+            beta = self.beta_sample
+        elif mode == "train":
+            beta = self.beta_train
+        elif mode == "deploy":
+            beta = self.beta_deploy
+
         if action_validity is not None:
             outputs = outputs + (~action_validity).float() * -1e9
 
