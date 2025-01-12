@@ -58,7 +58,8 @@ class QAgent:
         self.input_channels = input_channels
         self.action_size = action_size
 
-        self.network = QNetwork(input_channels, action_size)
+        self.network_1 = QNetwork(input_channels, action_size)
+        self.network_2 = QNetwork(input_channels, action_size)
 
         self.gamma = gamma
         self.beta_train = beta_train
@@ -67,9 +68,12 @@ class QAgent:
 
         self.q_cap = None if reward_cap is None else (1/(1-gamma)) * reward_cap
 
-        # Add target network for stable learning
-        self.target_network = QNetwork(input_channels, action_size)
-        self.target_network.load_state_dict(self.network.state_dict())
+        # Create two target networks
+        self.target_network_1 = QNetwork(input_channels, action_size)
+        self.target_network_2 = QNetwork(input_channels, action_size)
+        
+        self.target_network_1.load_state_dict(self.network_1.state_dict())
+        self.target_network_2.load_state_dict(self.network_2.state_dict())
 
     def get_loss(self, data: dict[str, torch.Tensor]):
         """
@@ -88,13 +92,15 @@ class QAgent:
         # Throw away the first state as we don't know what came before it
         invalid_actions_mask = (~data["action_validity"]).float() * -1e9
         next_state_invalid_actions_mask = (~data["next_state_action_validity"]).float() * -1e9
-        outputs = self.network(data["state"]) + invalid_actions_mask
 
-        probabilities = self.beta_softmax(outputs, mode="sample", action_validity=data["action_validity"])
-        
-        # Use target network with temperature scaling
         with torch.no_grad():
-            next_q_values = self.target_network(data["next_state"]) + next_state_invalid_actions_mask
+            # Get Q-values from both target networks
+            next_q_values_1 = self.target_network_1(data["next_state"]) + next_state_invalid_actions_mask
+            next_q_values_2 = self.target_network_2(data["next_state"]) + next_state_invalid_actions_mask
+            
+            # Take the minimum Q-value between the two networks
+            next_q_values = torch.minimum(next_q_values_1, next_q_values_2)
+
             if self.q_cap is not None:
                 next_q_values_capped = next_q_values.clamp(max=self.q_cap)
             else:
@@ -109,8 +115,22 @@ class QAgent:
 
             target_rewards = data["reward"] + self.gamma * next_values
 
-        predicted_rewards = outputs.gather(1, data["action"].unsqueeze(1)).squeeze()
-        loss = F.smooth_l1_loss(predicted_rewards, target_rewards)
+        # Calculate losses for both networks
+        outputs_1 = self.network_1(data["state"]) + invalid_actions_mask
+        outputs_2 = self.network_2(data["state"]) + invalid_actions_mask
+
+        predicted_rewards_1 = outputs_1.gather(1, data["action"].unsqueeze(1)).squeeze()
+        predicted_rewards_2 = outputs_2.gather(1, data["action"].unsqueeze(1)).squeeze()
+
+        loss_1 = F.smooth_l1_loss(predicted_rewards_1, target_rewards)
+        loss_2 = F.smooth_l1_loss(predicted_rewards_2, target_rewards)
+
+        # Total loss is the sum of both networks' losses
+        loss = loss_1 + loss_2
+
+        # Use average of both networks for probabilities and outputs
+        outputs = (outputs_1 + outputs_2) / 2
+        probabilities = self.beta_softmax(outputs, mode="sample", action_validity=data["action_validity"])
 
         # Calculate KL divergence
         base_probabilities = F.softmax(invalid_actions_mask, dim=1)
@@ -139,7 +159,7 @@ class QAgent:
         Returns:
             int: Action to take
         """
-        outputs = self.network(state)
+        outputs = (self.network_1(state) + self.network_2(state)) / 2
         probabilities = self.beta_softmax(outputs, mode=mode, action_validity=action_validity)
         # Choose randomly
 
@@ -163,10 +183,15 @@ class QAgent:
             tau (float): Tau value for the exponential moving average
         """
 
-        new_state_dict = self.network.state_dict()
+        new_state_dict = self.network_1.state_dict()
         for name, param in new_state_dict.items():
-            self.target_network.state_dict()[name].copy_(
-                self.target_network.state_dict()[name] * (1-tau) + param * tau)
+            self.target_network_1.state_dict()[name].copy_(
+                self.target_network_1.state_dict()[name] * (1-tau) + param * tau)
+        
+        new_state_dict = self.network_2.state_dict()
+        for name, param in new_state_dict.items():
+            self.target_network_2.state_dict()[name].copy_(
+                self.target_network_2.state_dict()[name] * (1-tau) + param * tau)
         
     def beta_softmax(self, outputs: torch.Tensor, mode: Literal["sample", "train", "deploy"], action_validity: torch.Tensor|None = None):
         """
@@ -256,7 +281,8 @@ class QLearning:
 
         self.q_agent = QAgent(**q_agent_config)
 
-        self.optimizer = torch.optim.AdamW(self.q_agent.network.parameters(), **adamw_config)
+        self.optimizer_1 = torch.optim.AdamW(self.q_agent.network_1.parameters(), **adamw_config)
+        self.optimizer_2 = torch.optim.AdamW(self.q_agent.network_2.parameters(), **adamw_config)
 
     def get_action_validity(self, gridworld: TomatoGrid):
         valid_actions = gridworld.get_valid_actions()
@@ -294,10 +320,12 @@ class QLearning:
                 try:
                     loss_output = self.q_agent.get_loss(self.state_buffer.get_batch())
 
-                    self.optimizer.zero_grad()
+                    self.optimizer_1.zero_grad()
+                    self.optimizer_2.zero_grad()
                     loss = loss_output["loss"]
                     loss.backward()
-                    self.optimizer.step()
+                    self.optimizer_1.step()
+                    self.optimizer_2.step()
                 
                     self.q_agent.update_target_network(tau=0.001)
 
