@@ -84,6 +84,8 @@ class QAgent:
 
         self.kl_divergence_constant = kl_divergence_constant
 
+        self.average_reward = 0
+
     def get_loss(self, data: dict[str, torch.Tensor]):
         """
         Get the loss from a batch of data, containing rewards per state, actions taken, and input states
@@ -140,8 +142,10 @@ class QAgent:
         predicted_rewards_2 = outputs_2.gather(1, data["action"].unsqueeze(1)).squeeze()
 
         # Swap the target rewards for the two networks
-        loss_1 = F.smooth_l1_loss(predicted_rewards_1, target_rewards_2)
-        loss_2 = F.smooth_l1_loss(predicted_rewards_2, target_rewards_1)
+        loss_1 = F.smooth_l1_loss(predicted_rewards_1, target_rewards_2 - self.average_reward)
+        loss_2 = F.smooth_l1_loss(predicted_rewards_2, target_rewards_1 - self.average_reward)
+
+        self.average_reward = 0.9 * self.average_reward + 0.1 * data["reward"].mean().item()
 
         # Total loss is the sum of both networks' losses
         loss = loss_1 + loss_2
