@@ -51,6 +51,7 @@ class QAgent:
             action_size: int = 5,
             gamma: float = 0.99,
             variable_beta: bool = False,
+            kl_divergence_constant: float|None = None,
             beta_train: float|None = None,
             beta_sample: float|None = None,
             beta_deploy: float|None = None,
@@ -81,6 +82,8 @@ class QAgent:
         self.target_network_1.load_state_dict(self.network_1.state_dict())
         self.target_network_2.load_state_dict(self.network_2.state_dict())
 
+        self.kl_divergence_constant = kl_divergence_constant
+
     def get_loss(self, data: dict[str, torch.Tensor]):
         """
         Get the loss from a batch of data, containing rewards per state, actions taken, and input states
@@ -104,34 +107,34 @@ class QAgent:
             next_q_values_1 = self.target_network_1(data["next_state"])
             next_q_values_2 = self.target_network_2(data["next_state"])
             
-            # Take the minimum Q-value between the two networks
-
-            if self.q_cap is not None:
-                next_q_values_1_capped = next_q_values_1.clamp(max=self.q_cap)
-                next_q_values_2_capped = next_q_values_2.clamp(max=self.q_cap)
-            else:
-                next_q_values_1_capped = next_q_values_1
-                next_q_values_2_capped = next_q_values_2
-
-            next_probabilities_1 = self.beta_softmax(
+            next_probabilities_1 = self.get_probabilities(
                 next_q_values_1 + next_state_invalid_actions_mask,
                 mode="train",
                 action_validity=data["action_validity"])
             
-            next_probabilities_2 = self.beta_softmax(
+            next_probabilities_2 = self.get_probabilities(
                 next_q_values_2 + next_state_invalid_actions_mask,
                 mode="train",
                 action_validity=data["action_validity"])
-            
-            next_values_1 = torch.einsum("ba,ba->b", next_probabilities_1, next_q_values_1_capped)
-            next_values_2 = torch.einsum("ba,ba->b", next_probabilities_2, next_q_values_2_capped)
+
+            next_values_1 = torch.einsum("ba,ba->b", next_probabilities_1, next_q_values_1)
+            next_values_2 = torch.einsum("ba,ba->b", next_probabilities_2, next_q_values_2)
 
             target_rewards_1 = data["reward"] + self.gamma * next_values_1
             target_rewards_2 = data["reward"] + self.gamma * next_values_2
 
+            if self.kl_divergence_constant is not None:
+                next_state_prior = F.softmax(next_state_invalid_actions_mask, dim=-1)
+
+                next_kl_divergence_1 = F.kl_div(torch.log(next_probabilities_1), next_state_prior, reduction="none").sum(dim=-1)
+                next_kl_divergence_2 = F.kl_div(torch.log(next_probabilities_2), next_state_prior, reduction="none").sum(dim=-1)
+
+                target_rewards_1 = target_rewards_1 - self.kl_divergence_constant * next_kl_divergence_1
+                target_rewards_2 = target_rewards_2 - self.kl_divergence_constant * next_kl_divergence_2
+
         # Calculate losses for both networks
-        outputs_1 = self.network_1(data["state"]) + invalid_actions_mask
-        outputs_2 = self.network_2(data["state"]) + invalid_actions_mask
+        outputs_1 = self.network_1(data["state"])
+        outputs_2 = self.network_2(data["state"])
 
         predicted_rewards_1 = outputs_1.gather(1, data["action"].unsqueeze(1)).squeeze()
         predicted_rewards_2 = outputs_2.gather(1, data["action"].unsqueeze(1)).squeeze()
@@ -145,20 +148,14 @@ class QAgent:
 
         # Use average of both networks for probabilities and outputs
         outputs = (outputs_1 + outputs_2) / 2
-        probabilities = self.beta_softmax(outputs, mode="sample", action_validity=data["action_validity"])
-
-        # Calculate KL divergence
-        base_probabilities = F.softmax(invalid_actions_mask, dim=1)
-        probabilities_ratio = base_probabilities / (probabilities + 1e-9) + 1e-9
-        kl_divergence = torch.sum(base_probabilities * torch.log(probabilities_ratio), dim=-1).mean()
+        probabilities = self.get_probabilities(outputs, mode="sample", action_validity=data["action_validity"])
 
         return {
             "loss": loss,
             "outputs": outputs,
             "probabilities": probabilities,
-            "kl_divergence": kl_divergence,
         }
-    
+
     def get_action(
             self, *,
             state: torch.Tensor,
@@ -175,7 +172,7 @@ class QAgent:
             int: Action to take
         """
         outputs = (self.network_1(state) + self.network_2(state)) / 2
-        probabilities = self.beta_softmax(outputs, mode=mode, action_validity=action_validity)
+        probabilities = self.get_probabilities(outputs, mode=mode, action_validity=action_validity)
         # Choose randomly
 
         try:
@@ -208,14 +205,18 @@ class QAgent:
             self.target_network_2.state_dict()[name].copy_(
                 self.target_network_2.state_dict()[name] * (1-tau) + param * tau)
         
-    def beta_softmax(self, outputs: torch.Tensor, mode: Literal["sample", "train", "deploy"], action_validity: torch.Tensor|None = None):
+    def get_probabilities(self, outputs: torch.Tensor, mode: Literal["sample", "train", "deploy"], action_validity: torch.Tensor|None = None):
         """
-        Softmax with beta scaling
+        Get the probabilities from the network, can use softmax, max, or capped softmax
 
         Args:
             outputs (torch.Tensor): Outputs from the network of shape (batch_size, action_size)
             mode (Literal["sample", "train", "deploy"]): Mode to use for the softmax
             action_validity (torch.Tensor|None): Action validity mask of shape (batch_size, action_size)
+
+        Other Dependencies:
+            self.beta_ for beta values (if None, it uses argmax, and self.q_cap is ignored)
+            self.q_cap for q_cap values (if None, it uses softmax, if not None, it uses capped softmax)
 
         Returns:
             torch.Tensor: Probabilities of shape (batch_size, action_size)
@@ -240,11 +241,18 @@ class QAgent:
 
 
         # Apply temperature scaling if beta is provided
-        if beta is not None:
-            probabilities = F.softmax(outputs * beta + action_validity_mask, dim=-1)
+        if beta is None:
+            # If no beta, use argmax
+            probabilities = torch.zeros_like(outputs)
+            probabilities[torch.arange(outputs.shape[0]), torch.argmax(outputs + action_validity_mask, dim=-1)] = 1
         else:
-            probabilities = torch.zeros_like(outputs + action_validity_mask)
-            probabilities[torch.arange(outputs.shape[0]), torch.argmax(outputs, dim=-1)] = 1
+            if self.q_cap is None:
+                # If no q_cap, use softmax
+                probabilities = F.softmax(outputs * beta + action_validity_mask, dim=-1)
+            else:
+                # If q_cap is provided, use capped softmax
+                log_probabilities = -self.safe_log_one_plus_exp(beta * (self.q_cap - outputs)) + action_validity_mask
+                probabilities = F.softmax(log_probabilities, dim=-1)
 
         # Clamp negative probabilities
         if probabilities.max() < 0:
@@ -258,6 +266,13 @@ class QAgent:
 
 
         return probabilities
+    
+    @staticmethod
+    def safe_log_one_plus_exp(x: torch.Tensor, threshold: float = 5):
+        output = torch.zeros_like(x)
+        output[x < threshold] = torch.log(1 + torch.exp(x[x < threshold]))
+        output[x >= threshold] = x[x >= threshold]
+        return output
 
 class StateBuffer:
     def __init__(self, buffer_size: int, batch_size: int):
@@ -278,7 +293,7 @@ class StateBuffer:
         # Convert list of dicts to dict of lists
         batch_dict = {}
         for key in batch[0].keys():
-            batch_dict[key] = torch.stack([d[key] for d in batch])
+            batch_dict[key] = torch.stack([d[key].squeeze() for d in batch])
 
         return batch_dict
     
@@ -306,6 +321,8 @@ class QLearning:
         self.optimizer_1 = torch.optim.AdamW(self.q_agent.network_1.parameters(), **adamw_config)
         self.optimizer_2 = torch.optim.AdamW(self.q_agent.network_2.parameters(), **adamw_config)
 
+        self.outputs = []
+
     def get_action_validity(self, gridworld: TomatoGrid):
         valid_actions = gridworld.get_valid_actions()
         action_validity = torch.tensor([action in valid_actions for action in list(Action)])
@@ -323,7 +340,7 @@ class QLearning:
             state = gridworld.get_state_tensor()
             dict_["state"] = state
 
-            dict_["action_validity"] = self.get_action_validity(gridworld)
+            dict_["action_validity"] = self.get_action_validity(gridworld).unsqueeze(0)
 
             action_idx = self.q_agent.get_action(state = state.unsqueeze(0), action_validity=dict_["action_validity"], mode="sample")
             dict_["action"] = torch.tensor(action_idx)
@@ -333,7 +350,7 @@ class QLearning:
             output = gridworld.update_grid(action)
 
             dict_["next_state"] = gridworld.get_state_tensor()
-            dict_["next_state_action_validity"] = self.get_action_validity(gridworld)
+            dict_["next_state_action_validity"] = self.get_action_validity(gridworld).unsqueeze(0)
 
             dict_["reward"] = torch.tensor(output.misspecified_reward)
             self.state_buffer.add(dict_)
@@ -357,7 +374,8 @@ class QLearning:
 
             if step_idx % 1000 == 0:
                 test_output = self.test_model()
-                print(f"Step {step_idx}: Misspecified reward: {test_output['misspecified_reward']}, True utility: {test_output['true_utility']}")
+                print(test_output)
+                self.outputs.append(test_output)
 
     def test_model(self):
         gridworlds = [TomatoGrid(**self.gridworld_config) for _ in range(10)]
