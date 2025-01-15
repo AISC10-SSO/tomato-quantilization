@@ -50,6 +50,7 @@ class QAgent:
             input_channels: int = 6,
             action_size: int = 5,
             gamma: float = 0.99,
+            variable_beta: bool = False,
             beta_train: float|None = None,
             beta_sample: float|None = None,
             beta_deploy: float|None = None,
@@ -62,9 +63,14 @@ class QAgent:
         self.network_2 = QNetwork(input_channels, action_size)
 
         self.gamma = gamma
-        self.beta_train = beta_train
-        self.beta_sample = beta_sample
-        self.beta_deploy = beta_deploy
+        if variable_beta:
+            self.beta_train = nn.Parameter(torch.tensor(beta_train))
+            self.beta_sample = nn.Parameter(torch.tensor(beta_sample))
+            self.beta_deploy = nn.Parameter(torch.tensor(beta_deploy))
+        else:
+            self.beta_train = beta_train
+            self.beta_sample = beta_sample
+            self.beta_deploy = beta_deploy
 
         self.q_cap = None if reward_cap is None else (1/(1-gamma)) * reward_cap
 
@@ -95,25 +101,33 @@ class QAgent:
 
         with torch.no_grad():
             # Get Q-values from both target networks
-            next_q_values_1 = self.target_network_1(data["next_state"]) + next_state_invalid_actions_mask
-            next_q_values_2 = self.target_network_2(data["next_state"]) + next_state_invalid_actions_mask
+            next_q_values_1 = self.target_network_1(data["next_state"])
+            next_q_values_2 = self.target_network_2(data["next_state"])
             
             # Take the minimum Q-value between the two networks
-            next_q_values = torch.minimum(next_q_values_1, next_q_values_2)
 
             if self.q_cap is not None:
-                next_q_values_capped = next_q_values.clamp(max=self.q_cap)
+                next_q_values_1_capped = next_q_values_1.clamp(max=self.q_cap)
+                next_q_values_2_capped = next_q_values_2.clamp(max=self.q_cap)
             else:
-                next_q_values_capped = next_q_values
+                next_q_values_1_capped = next_q_values_1
+                next_q_values_2_capped = next_q_values_2
 
-            next_probabilities = self.beta_softmax(
-                next_q_values,
+            next_probabilities_1 = self.beta_softmax(
+                next_q_values_1 + next_state_invalid_actions_mask,
                 mode="train",
                 action_validity=data["action_validity"])
             
-            next_values = torch.einsum("ba,ba->b", next_probabilities, next_q_values_capped)
+            next_probabilities_2 = self.beta_softmax(
+                next_q_values_2 + next_state_invalid_actions_mask,
+                mode="train",
+                action_validity=data["action_validity"])
+            
+            next_values_1 = torch.einsum("ba,ba->b", next_probabilities_1, next_q_values_1_capped)
+            next_values_2 = torch.einsum("ba,ba->b", next_probabilities_2, next_q_values_2_capped)
 
-            target_rewards = data["reward"] + self.gamma * next_values
+            target_rewards_1 = data["reward"] + self.gamma * next_values_1
+            target_rewards_2 = data["reward"] + self.gamma * next_values_2
 
         # Calculate losses for both networks
         outputs_1 = self.network_1(data["state"]) + invalid_actions_mask
@@ -122,8 +136,9 @@ class QAgent:
         predicted_rewards_1 = outputs_1.gather(1, data["action"].unsqueeze(1)).squeeze()
         predicted_rewards_2 = outputs_2.gather(1, data["action"].unsqueeze(1)).squeeze()
 
-        loss_1 = F.smooth_l1_loss(predicted_rewards_1, target_rewards)
-        loss_2 = F.smooth_l1_loss(predicted_rewards_2, target_rewards)
+        # Swap the target rewards for the two networks
+        loss_1 = F.smooth_l1_loss(predicted_rewards_1, target_rewards_2)
+        loss_2 = F.smooth_l1_loss(predicted_rewards_2, target_rewards_1)
 
         # Total loss is the sum of both networks' losses
         loss = loss_1 + loss_2
@@ -214,14 +229,21 @@ class QAgent:
         elif mode == "deploy":
             beta = self.beta_deploy
 
-        if action_validity is not None:
-            outputs = outputs + (~action_validity).float() * -1e9
+        # Subtract the maximum value from each row to prevent overflow
+        outputs = outputs - outputs.max(dim=-1, keepdim=True).values
+
+        if action_validity is None:
+            action_validity_mask = torch.zeros_like(outputs)
+        else:
+            action_validity_mask = (~action_validity).float() * -1e9
+
+
 
         # Apply temperature scaling if beta is provided
         if beta is not None:
-            probabilities = F.softmax(outputs * beta, dim=-1)
+            probabilities = F.softmax(outputs * beta + action_validity_mask, dim=-1)
         else:
-            probabilities = torch.zeros_like(outputs)
+            probabilities = torch.zeros_like(outputs + action_validity_mask)
             probabilities[torch.arange(outputs.shape[0]), torch.argmax(outputs, dim=-1)] = 1
 
         # Clamp negative probabilities
@@ -316,21 +338,22 @@ class QLearning:
             dict_["reward"] = torch.tensor(output.misspecified_reward)
             self.state_buffer.add(dict_)
 
-            if step_idx % 100 == 0 and step_idx > 0:
-                try:
+            if step_idx % 100 == 0 and step_idx > 0 and len(self.state_buffer) > self.config["batch_size"]:
+                for _ in range(10):
                     loss_output = self.q_agent.get_loss(self.state_buffer.get_batch())
 
                     self.optimizer_1.zero_grad()
                     self.optimizer_2.zero_grad()
                     loss = loss_output["loss"]
                     loss.backward()
+
+                    nn.utils.clip_grad_norm_(self.q_agent.network_1.parameters(), max_norm=1.0)
+                    nn.utils.clip_grad_norm_(self.q_agent.network_2.parameters(), max_norm=1.0)
+
                     self.optimizer_1.step()
                     self.optimizer_2.step()
                 
-                    self.q_agent.update_target_network(tau=0.001)
-
-                except ValueError:
-                    pass
+                    self.q_agent.update_target_network(tau=0.01)
 
             if step_idx % 1000 == 0:
                 test_output = self.test_model()
