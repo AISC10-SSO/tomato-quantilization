@@ -50,12 +50,11 @@ class QAgent:
             input_channels: int = 6,
             action_size: int = 5,
             gamma: float = 0.99,
-            variable_beta: bool = False,
-            kl_divergence_constant: float|None = None,
-            beta_train: float|None = None,
+            kl_divergence_coefficient: float|None = None,
             beta_sample: float|None = None,
             beta_deploy: float|None = None,
-            reward_cap: float|None = None):
+            reward_cap: float|None = None,
+            variable_beta: bool = False):
 
         self.input_channels = input_channels
         self.action_size = action_size
@@ -64,16 +63,18 @@ class QAgent:
         self.network_2 = QNetwork(input_channels, action_size)
 
         self.gamma = gamma
+
+        self.beta_sample = beta_sample
+
         if variable_beta:
-            self.beta_train = nn.Parameter(torch.tensor(beta_train))
-            self.beta_sample = nn.Parameter(torch.tensor(beta_sample))
             self.beta_deploy = nn.Parameter(torch.tensor(beta_deploy))
         else:
-            self.beta_train = beta_train
-            self.beta_sample = beta_sample
             self.beta_deploy = beta_deploy
 
-        self.q_cap = None if reward_cap is None else (1/(1-gamma)) * reward_cap
+        self.reward_cap = reward_cap
+
+        # self.q_cap = None if reward_cap is None else (1/(1-gamma)) * reward_cap
+        self.q_cap = None
 
         # Create two target networks
         self.target_network_1 = QNetwork(input_channels, action_size)
@@ -82,9 +83,9 @@ class QAgent:
         self.target_network_1.load_state_dict(self.network_1.state_dict())
         self.target_network_2.load_state_dict(self.network_2.state_dict())
 
-        self.kl_divergence_constant = kl_divergence_constant
+        self.kl_divergence_coefficient = kl_divergence_coefficient
 
-        self.average_reward = 0
+        self.average_q_value = 0
 
     def get_loss(self, data: dict[str, torch.Tensor]):
         """
@@ -101,6 +102,7 @@ class QAgent:
         # Predict the rewards for each state, given the beta value
         # This means taking the probabilities of each action and multiplying them by the predicted rewards (Q values)
         # Throw away the first state as we don't know what came before it
+
         invalid_actions_mask = (~data["action_validity"]).float() * -1e9
         next_state_invalid_actions_mask = (~data["next_state_action_validity"]).float() * -1e9
 
@@ -111,28 +113,32 @@ class QAgent:
             
             next_probabilities_1 = self.get_probabilities(
                 next_q_values_1 + next_state_invalid_actions_mask,
-                mode="train",
+                mode="deploy",
                 action_validity=data["action_validity"])
             
             next_probabilities_2 = self.get_probabilities(
                 next_q_values_2 + next_state_invalid_actions_mask,
-                mode="train",
+                mode="deploy",
                 action_validity=data["action_validity"])
 
             next_values_1 = torch.einsum("ba,ba->b", next_probabilities_1, next_q_values_1)
             next_values_2 = torch.einsum("ba,ba->b", next_probabilities_2, next_q_values_2)
 
-            target_rewards_1 = data["reward"] + self.gamma * next_values_1
-            target_rewards_2 = data["reward"] + self.gamma * next_values_2
+            reward = data["reward"]
+            if self.reward_cap is not None:
+                reward = reward.clamp(max=self.reward_cap)
 
-            if self.kl_divergence_constant is not None:
+            target_rewards_1 = reward + self.gamma * next_values_1
+            target_rewards_2 = reward + self.gamma * next_values_2
+
+            if self.kl_divergence_coefficient is not None:
                 next_state_prior = F.softmax(next_state_invalid_actions_mask, dim=-1)
 
                 next_kl_divergence_1 = F.kl_div(torch.log(next_probabilities_1), next_state_prior, reduction="none").sum(dim=-1)
                 next_kl_divergence_2 = F.kl_div(torch.log(next_probabilities_2), next_state_prior, reduction="none").sum(dim=-1)
 
-                target_rewards_1 = target_rewards_1 - self.kl_divergence_constant * next_kl_divergence_1
-                target_rewards_2 = target_rewards_2 - self.kl_divergence_constant * next_kl_divergence_2
+                target_rewards_1 = target_rewards_1 - self.kl_divergence_coefficient * next_kl_divergence_1
+                target_rewards_2 = target_rewards_2 - self.kl_divergence_coefficient * next_kl_divergence_2
 
         # Calculate losses for both networks
         outputs_1 = self.network_1(data["state"])
@@ -142,22 +148,27 @@ class QAgent:
         predicted_rewards_2 = outputs_2.gather(1, data["action"].unsqueeze(1)).squeeze()
 
         # Swap the target rewards for the two networks
-        loss_1 = F.smooth_l1_loss(predicted_rewards_1, target_rewards_2 - self.average_reward)
-        loss_2 = F.smooth_l1_loss(predicted_rewards_2, target_rewards_1 - self.average_reward)
+        loss_1 = F.smooth_l1_loss(predicted_rewards_1, target_rewards_2 - self.average_q_value)
+        loss_2 = F.smooth_l1_loss(predicted_rewards_2, target_rewards_1 - self.average_q_value)
 
-        self.average_reward = 0.9 * self.average_reward + 0.1 * data["reward"].mean().item()
+        self.average_q_value = 0.9 * self.average_q_value + 0.1 * data["reward"].float().mean().item()
 
         # Total loss is the sum of both networks' losses
         loss = loss_1 + loss_2
 
         # Use average of both networks for probabilities and outputs
         outputs = (outputs_1 + outputs_2) / 2
-        probabilities = self.get_probabilities(outputs, mode="sample", action_validity=data["action_validity"])
+        probabilities = self.get_probabilities(outputs.detach(), mode="sample", action_validity=data["action_validity"])
+
+
+        kl_divergence = F.kl_div(torch.log(probabilities), F.softmax(invalid_actions_mask, dim=-1), reduction="none").sum(dim=-1)
+
 
         return {
             "loss": loss,
             "outputs": outputs,
             "probabilities": probabilities,
+            "kl_divergence": kl_divergence
         }
 
     def get_action(
@@ -183,7 +194,6 @@ class QAgent:
             output =  torch.multinomial(probabilities, 1)
         except Exception as e:
             logger.warning(f"Error getting action: {e}")
-            logger.warning(f"Probabilities: {probabilities}")
             output = torch.argmax(probabilities, dim=-1)
 
         if output.shape[0] == 1:
@@ -209,7 +219,7 @@ class QAgent:
             self.target_network_2.state_dict()[name].copy_(
                 self.target_network_2.state_dict()[name] * (1-tau) + param * tau)
         
-    def get_probabilities(self, outputs: torch.Tensor, mode: Literal["sample", "train", "deploy"], action_validity: torch.Tensor|None = None):
+    def get_probabilities(self, outputs: torch.Tensor, mode: Literal["sample", "deploy"], action_validity: torch.Tensor|None = None):
         """
         Get the probabilities from the network, can use softmax, max, or capped softmax
 
@@ -221,7 +231,7 @@ class QAgent:
         Other Dependencies:
             self.beta_ for beta values (if None, it uses argmax, and self.q_cap is ignored)
             self.q_cap for q_cap values (if None, it uses softmax, if not None, it uses capped softmax)
-
+            self.average_q_value for the average q value
         Returns:
             torch.Tensor: Probabilities of shape (batch_size, action_size)
         """
@@ -229,8 +239,6 @@ class QAgent:
         # Mask out invalid actions
         if mode == "sample":
             beta = self.beta_sample
-        elif mode == "train":
-            beta = self.beta_train
         elif mode == "deploy":
             beta = self.beta_deploy
 
@@ -241,8 +249,6 @@ class QAgent:
             action_validity_mask = torch.zeros_like(outputs)
         else:
             action_validity_mask = (~action_validity).float() * -1e9
-
-
 
         # Apply temperature scaling if beta is provided
         if beta is None:
@@ -255,7 +261,7 @@ class QAgent:
                 probabilities = F.softmax(outputs * beta + action_validity_mask, dim=-1)
             else:
                 # If q_cap is provided, use capped softmax
-                log_probabilities = -self.safe_log_one_plus_exp(beta * (self.q_cap - outputs)) + action_validity_mask
+                log_probabilities = -self.safe_log_one_plus_exp(beta * (self.q_cap - (outputs + self.average_q_value))) + action_validity_mask
                 probabilities = F.softmax(log_probabilities, dim=-1)
 
         # Clamp negative probabilities
@@ -267,7 +273,6 @@ class QAgent:
         if probabilities.isnan().any() or probabilities.isinf().any():
             logger.warning("NaN or inf probability detected")
             probabilities = torch.ones_like(probabilities)
-
 
         return probabilities
     
@@ -366,6 +371,14 @@ class QLearning:
                     self.optimizer_1.zero_grad()
                     self.optimizer_2.zero_grad()
                     loss = loss_output["loss"]
+
+                    if self.config["kl_divergence_target"] is not None:
+                        kl_divergence = loss_output["kl_divergence"]
+                        kl_divergence_loss = F.smooth_l1_loss(
+                            kl_divergence / self.config["kl_divergence_target"],
+                            torch.ones_like(kl_divergence))
+                        loss += kl_divergence_loss
+
                     loss.backward()
 
                     nn.utils.clip_grad_norm_(self.q_agent.network_1.parameters(), max_norm=1.0)
