@@ -8,8 +8,8 @@ def main():
     torch.set_default_device(device)
 
     test_q_learning(
-        beta_train_deploy=1/13,
-        beta_sample=1/13,
+        t_inv_train_deploy=1/13,
+        t_inv_sample=1/13,
         gamma=0.99,
         runs=1,
         reward_cap=0.61*13,
@@ -18,8 +18,8 @@ def main():
         steps=100_000)
 
 def test_q_learning(
-        beta_train_deploy: float|None = None,
-        beta_sample: float|None = None,
+        t_inv_train_deploy: float|None = None,
+        t_inv_sample: float|None = None,
         gamma: float|None = None,
         reward_cap: float|None = None,
         runs: int = 10,
@@ -40,10 +40,10 @@ def test_q_learning(
     q_agent_config = {
         "gamma": gamma,
         "reward_cap": reward_cap,
-        "beta_sample": beta_sample,
-        "beta_deploy": beta_train_deploy,
+        "t_inv_sample": t_inv_sample,
+        "t_inv_deploy": t_inv_train_deploy,
         "kl_divergence_coefficient": kl_divergence_coefficient,
-        "variable_beta": config["kl_divergence_target"] is not None
+        "variable_t_inv": config["kl_divergence_target"] is not None
     }
 
     outputs = []
@@ -54,8 +54,8 @@ def test_q_learning(
         outputs.extend(q_learning.outputs)
 
     output_df = pd.DataFrame(outputs)
-    output_df["beta_train_deploy"] = beta_train_deploy
-    output_df["beta_sample"] = beta_sample
+    output_df["t_inv_train_deploy"] = t_inv_train_deploy
+    output_df["t_inv_sample"] = t_inv_sample
     output_df["gamma"] = gamma
     output_df["reward_cap"] = reward_cap
 

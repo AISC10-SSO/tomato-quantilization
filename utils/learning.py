@@ -49,12 +49,12 @@ class QAgent:
             self, *,
             input_channels: int = 6,
             action_size: int = 5,
-            gamma: float = 0.99,
+            gamma: float = 1.99,
             kl_divergence_coefficient: float|None = None,
-            beta_sample: float|None = None,
-            beta_deploy: float|None = None,
+            t_inv_sample: float|None = None,
+            t_inv_deploy: float|None = None,
             reward_cap: float|None = None,
-            variable_beta: bool = False):
+            variable_t_inv: bool = False):
 
         self.input_channels = input_channels
         self.action_size = action_size
@@ -64,12 +64,12 @@ class QAgent:
 
         self.gamma = gamma
 
-        self.beta_sample = beta_sample
+        self.t_inv_sample = t_inv_sample
 
-        if variable_beta:
-            self.beta_deploy = nn.Parameter(torch.tensor(beta_deploy))
+        if variable_t_inv:
+            self.t_inv_deploy = nn.Parameter(torch.tensor(t_inv_deploy))
         else:
-            self.beta_deploy = beta_deploy
+            self.t_inv_deploy = t_inv_deploy
 
         self.reward_cap = reward_cap
 
@@ -93,7 +93,7 @@ class QAgent:
 
         Args:
             data (dict[str, torch.Tensor]): Dictionary containing "state", "next_state", "reward", "action", and "action_validity"
-            beta (float): Beta value for the temperature scaling
+            t_inv (float): inverse T value for the temperature scaling
 
         Returns:
             dict[str, torch.Tensor]: Dictionary containing "loss", "outputs", "probabilities", and "kl_divergence"
@@ -163,7 +163,6 @@ class QAgent:
 
         kl_divergence = F.kl_div(torch.log(probabilities), F.softmax(invalid_actions_mask, dim=-1), reduction="none").sum(dim=-1)
 
-
         return {
             "loss": loss,
             "outputs": outputs,
@@ -229,8 +228,8 @@ class QAgent:
             action_validity (torch.Tensor|None): Action validity mask of shape (batch_size, action_size)
 
         Other Dependencies:
-            self.beta_ for beta values (if None, it uses argmax, and self.q_cap is ignored)
-            self.q_cap for q_cap values (if None, it uses softmax, if not None, it uses capped softmax)
+            self.t_inv_sample for t_inv values (if None, it uses argmax, and self.q_cap is ignored)
+            self.t_inv_deploy for t_inv values (if None, it uses argmax, and self.q_cap is ignored)
             self.average_q_value for the average q value
         Returns:
             torch.Tensor: Probabilities of shape (batch_size, action_size)
@@ -238,9 +237,9 @@ class QAgent:
 
         # Mask out invalid actions
         if mode == "sample":
-            beta = self.beta_sample
+            t_inv = self.t_inv_sample
         elif mode == "deploy":
-            beta = self.beta_deploy
+            t_inv = self.t_inv_deploy
 
         # Subtract the maximum value from each row to prevent overflow
         outputs = outputs - outputs.max(dim=-1, keepdim=True).values
@@ -250,18 +249,18 @@ class QAgent:
         else:
             action_validity_mask = (~action_validity).float() * -1e9
 
-        # Apply temperature scaling if beta is provided
-        if beta is None:
-            # If no beta, use argmax
+        # Apply temperature scaling if t_inv is provided
+        if t_inv is None:
+            # If no t_inv, use argmax
             probabilities = torch.zeros_like(outputs)
             probabilities[torch.arange(outputs.shape[0]), torch.argmax(outputs + action_validity_mask, dim=-1)] = 1
         else:
             if self.q_cap is None:
                 # If no q_cap, use softmax
-                probabilities = F.softmax(outputs * beta + action_validity_mask, dim=-1)
+                probabilities = F.softmax(outputs * t_inv + action_validity_mask, dim=-1)
             else:
                 # If q_cap is provided, use capped softmax
-                log_probabilities = -self.safe_log_one_plus_exp(beta * (self.q_cap - (outputs + self.average_q_value))) + action_validity_mask
+                log_probabilities = -self.safe_log_one_plus_exp(t_inv * (self.q_cap - (outputs + self.average_q_value))) + action_validity_mask
                 probabilities = F.softmax(log_probabilities, dim=-1)
 
         # Clamp negative probabilities
