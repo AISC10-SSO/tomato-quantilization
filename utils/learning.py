@@ -140,8 +140,10 @@ class QAgent(nn.Module):
             if self.kl_divergence_coefficient is not None:
                 next_state_prior = F.softmax(next_state_invalid_actions_mask, dim=-1)
 
-                next_kl_divergence_1 = F.kl_div(torch.log(next_probabilities_1), next_state_prior, reduction="none").sum(dim=-1)
-                next_kl_divergence_2 = F.kl_div(torch.log(next_probabilities_2), next_state_prior, reduction="none").sum(dim=-1)
+                base_probabilities = F.softmax(next_state_invalid_actions_mask, dim=-1)
+
+                next_kl_divergence_1 = self.safe_kl_div(base_probabilities=base_probabilities, altered_probabilities=next_probabilities_1)
+                next_kl_divergence_2 = self.safe_kl_div(base_probabilities=base_probabilities, altered_probabilities=next_probabilities_2)
 
                 if self.kl_divergence_coefficient == "auto":
                     t_inv = self.t_inv_deploy
@@ -391,7 +393,8 @@ class QLearning:
 
                     if self.config["kl_divergence_target"] is not None:
                         kl_divergence = loss_output["kl_divergence"]
-                        kl_divergence_loss = F.relu(kl_divergence.mean() / self.config["kl_divergence_target"] - 1)
+                        kl_divergence_loss = F.smooth_l1_loss(
+                            kl_divergence.mean() / self.config["kl_divergence_target"], torch.tensor(1))
                         loss += kl_divergence_loss
 
                     loss.backward()
