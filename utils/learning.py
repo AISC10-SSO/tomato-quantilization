@@ -28,7 +28,9 @@ class QNetwork(nn.Module):
         self.fc1 = nn.Linear(64, 512)
         self.fc2 = nn.Linear(512, action_size)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        self.reward_so_far_projection = nn.Linear(1, 64, bias=False)
+
+    def forward(self, x: torch.Tensor, reward_so_far: torch.Tensor|None = None) -> torch.Tensor:
         """
         Forward pass of the Q Network
 
@@ -41,6 +43,10 @@ class QNetwork(nn.Module):
         x = F.relu(self.bn1(self.conv1(x)))
         x = F.relu(self.bn2(self.conv2(x)))
         x = x.mean(dim=(-2,-1))
+
+        if reward_so_far is not None:
+            x = x + self.reward_so_far_projection(reward_so_far)
+
         x = F.relu(self.fc1(x))
         return self.fc2(x)
     
@@ -50,10 +56,11 @@ class QAgent:
             input_channels: int = 6,
             action_size: int = 5,
             gamma: float = 1.99,
-            kl_divergence_coefficient: float|None = None,
+            kl_divergence_coefficient: float|None|Literal["auto"] = None,
             t_inv_sample: float|None = None,
             t_inv_deploy: float|None = None,
             reward_cap: float|None = None,
+            q_cap: float|None = None,
             variable_t_inv: bool = False):
 
         self.input_channels = input_channels
@@ -73,8 +80,7 @@ class QAgent:
 
         self.reward_cap = reward_cap
 
-        # self.q_cap = None if reward_cap is None else (1/(1-gamma)) * reward_cap
-        self.q_cap = None
+        self.q_cap = None if q_cap is None else (1/(1-gamma)) * q_cap
 
         # Create two target networks
         self.target_network_1 = QNetwork(input_channels, action_size)
@@ -84,8 +90,6 @@ class QAgent:
         self.target_network_2.load_state_dict(self.network_2.state_dict())
 
         self.kl_divergence_coefficient = kl_divergence_coefficient
-
-        self.average_q_value = 0
 
     def get_loss(self, data: dict[str, torch.Tensor]):
         """
@@ -99,7 +103,7 @@ class QAgent:
             dict[str, torch.Tensor]: Dictionary containing "loss", "outputs", "probabilities", and "kl_divergence"
         """
 
-        # Predict the rewards for each state, given the beta value
+        # Predict the rewards for each state, given the t_inv value
         # This means taking the probabilities of each action and multiplying them by the predicted rewards (Q values)
         # Throw away the first state as we don't know what came before it
 
@@ -125,6 +129,7 @@ class QAgent:
             next_values_2 = torch.einsum("ba,ba->b", next_probabilities_2, next_q_values_2)
 
             reward = data["reward"]
+
             if self.reward_cap is not None:
                 reward = reward.clamp(max=self.reward_cap)
 
@@ -137,8 +142,16 @@ class QAgent:
                 next_kl_divergence_1 = F.kl_div(torch.log(next_probabilities_1), next_state_prior, reduction="none").sum(dim=-1)
                 next_kl_divergence_2 = F.kl_div(torch.log(next_probabilities_2), next_state_prior, reduction="none").sum(dim=-1)
 
-                target_rewards_1 = target_rewards_1 - self.kl_divergence_coefficient * next_kl_divergence_1
-                target_rewards_2 = target_rewards_2 - self.kl_divergence_coefficient * next_kl_divergence_2
+                if self.kl_divergence_coefficient == "auto":
+                    t_inv = self.t_inv_deploy.clamp(min=1e-2)
+
+                    target_rewards_1 = target_rewards_1 - next_kl_divergence_1 / t_inv
+                    target_rewards_2 = target_rewards_2 - next_kl_divergence_2 / t_inv
+                else:
+                    target_rewards_1 = target_rewards_1 - self.kl_divergence_coefficient * next_kl_divergence_1
+                    target_rewards_2 = target_rewards_2 - self.kl_divergence_coefficient * next_kl_divergence_2
+
+
 
         # Calculate losses for both networks
         outputs_1 = self.network_1(data["state"])
@@ -148,10 +161,8 @@ class QAgent:
         predicted_rewards_2 = outputs_2.gather(1, data["action"].unsqueeze(1)).squeeze()
 
         # Swap the target rewards for the two networks
-        loss_1 = F.smooth_l1_loss(predicted_rewards_1, target_rewards_2 - self.average_q_value)
-        loss_2 = F.smooth_l1_loss(predicted_rewards_2, target_rewards_1 - self.average_q_value)
-
-        self.average_q_value = 0.9 * self.average_q_value + 0.1 * data["reward"].float().mean().item()
+        loss_1 = F.smooth_l1_loss(predicted_rewards_1, target_rewards_2)
+        loss_2 = F.smooth_l1_loss(predicted_rewards_2, target_rewards_1)
 
         # Total loss is the sum of both networks' losses
         loss = loss_1 + loss_2
@@ -159,7 +170,6 @@ class QAgent:
         # Use average of both networks for probabilities and outputs
         outputs = (outputs_1 + outputs_2) / 2
         probabilities = self.get_probabilities(outputs.detach(), mode="sample", action_validity=data["action_validity"])
-
 
         kl_divergence = F.kl_div(torch.log(probabilities), F.softmax(invalid_actions_mask, dim=-1), reduction="none").sum(dim=-1)
 
@@ -230,7 +240,6 @@ class QAgent:
         Other Dependencies:
             self.t_inv_sample for t_inv values (if None, it uses argmax, and self.q_cap is ignored)
             self.t_inv_deploy for t_inv values (if None, it uses argmax, and self.q_cap is ignored)
-            self.average_q_value for the average q value
         Returns:
             torch.Tensor: Probabilities of shape (batch_size, action_size)
         """
@@ -260,7 +269,7 @@ class QAgent:
                 probabilities = F.softmax(outputs * t_inv + action_validity_mask, dim=-1)
             else:
                 # If q_cap is provided, use capped softmax
-                log_probabilities = -self.safe_log_one_plus_exp(t_inv * (self.q_cap - (outputs + self.average_q_value))) + action_validity_mask
+                log_probabilities = -self.safe_log_one_plus_exp(t_inv * (self.q_cap - outputs)) + action_validity_mask
                 probabilities = F.softmax(log_probabilities, dim=-1)
 
         # Clamp negative probabilities
@@ -374,8 +383,8 @@ class QLearning:
                     if self.config["kl_divergence_target"] is not None:
                         kl_divergence = loss_output["kl_divergence"]
                         kl_divergence_loss = F.smooth_l1_loss(
-                            kl_divergence / self.config["kl_divergence_target"],
-                            torch.ones_like(kl_divergence))
+                            kl_divergence.mean() / self.config["kl_divergence_target"],
+                            torch.tensor(1.0))
                         loss += kl_divergence_loss
 
                     loss.backward()
@@ -397,14 +406,18 @@ class QLearning:
         gridworlds = [TomatoGrid(**self.gridworld_config) for _ in range(10)]
 
         outputs = []
+        kl_divergences = []
 
         for _ in range(100):
             state = torch.stack([gridworld.get_state_tensor() for gridworld in gridworlds])
-            action_indices = self.q_agent.get_action(state = state, action_validity=None, mode="deploy")
+            action_validity = torch.stack([self.get_action_validity(gridworld) for gridworld in gridworlds])
+            action_indices = self.q_agent.get_action(state = state, action_validity=action_validity, mode="deploy")
             actions = [list(Action)[action_idx] for action_idx in action_indices]
             outputs += [gridworld.update_grid(action) for gridworld, action in zip(gridworlds, actions)]
 
+
         misspecified_reward = np.mean([output.misspecified_reward for output in outputs])
         true_utility = np.mean([output.true_utility for output in outputs])
+
 
         return {"misspecified_reward": misspecified_reward, "true_utility": true_utility}
