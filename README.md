@@ -30,3 +30,9 @@ It is "suspicious" if the policy spends very little time on a tomato tile.
 We can try quantilizing by both the suspiciousness score and the reward.
 We also try quantilizing by some mixture of the (normalized) suspiciousness score and the (normalized) reward.
 Both work but are not very clean or nice.
+
+# Q-learning
+
+We add a Q-learning agent, code for which can be found in utils/learning.py.
+The Q-learning agent is able to reward hack the environment, which gets high reward but low utility.
+We have added a large number of options such as reward capping, temperature, KL divergence regularization, q capping, and more.
