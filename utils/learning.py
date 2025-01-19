@@ -147,7 +147,7 @@ class QAgent(nn.Module):
                     t_inv = self.t_inv_deploy
 
                     if type(t_inv) == torch.Tensor:
-                        t_inv = t_inv.detach().clamp(min=1e-2)
+                        t_inv = t_inv.clamp(min=1e-2)
 
                     target_rewards_1 = target_rewards_1 - next_kl_divergence_1 / t_inv
                     target_rewards_2 = target_rewards_2 - next_kl_divergence_2 / t_inv
@@ -174,13 +174,7 @@ class QAgent(nn.Module):
         # Use average of both networks for probabilities and outputs
         outputs = (outputs_1 + outputs_2) / 2
 
-        print(outputs)
-        print(self.t_inv_deploy)
-
         probabilities = self.get_probabilities(outputs.detach(), mode="deploy", action_validity=data["action_validity"])
-
-        print(probabilities)
-        breakpoint()
 
         kl_divergence = self.safe_kl_div(base_probabilities=F.softmax(invalid_actions_mask, dim=-1).detach(), altered_probabilities=probabilities)
 
@@ -305,12 +299,6 @@ class QAgent(nn.Module):
         output = torch.zeros_like(base_probabilities)
         suitable_indices = (base_probabilities > 1e-3) & (altered_probabilities > 1e-3)
         output[suitable_indices] = altered_probabilities[suitable_indices] * torch.log(altered_probabilities[suitable_indices] / base_probabilities[suitable_indices])
-
-        print(output.shape)
-        print(output.sum(dim=-1))
-
-        print(base_probabilities)
-        print(altered_probabilities)
 
         return output.sum(dim=-1)
 
