@@ -12,7 +12,7 @@ def main():
         t_inv_sample=1/13,
         gamma=0.99,
         runs=1,
-        kl_divergence_coefficient=None,
+        kl_divergence_coefficient=1,
         kl_divergence_target=np.log(100)/100,
         steps=100_000)
 

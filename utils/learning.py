@@ -147,7 +147,7 @@ class QAgent(nn.Module):
                     t_inv = self.t_inv_deploy
 
                     if type(t_inv) == torch.Tensor:
-                        t_inv = t_inv.clamp(min=1e-2)
+                        t_inv = t_inv.clamp(min=1e-1)
 
                     target_rewards_1 = target_rewards_1 - next_kl_divergence_1 / t_inv
                     target_rewards_2 = target_rewards_2 - next_kl_divergence_2 / t_inv
