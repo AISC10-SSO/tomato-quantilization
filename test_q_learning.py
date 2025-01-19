@@ -12,6 +12,8 @@ def main():
         t_inv_sample=1/13,
         gamma=0.99,
         runs=1,
+        q_cap = 8,
+        misspecified_reward=20,
         kl_divergence_coefficient="auto",
         kl_divergence_target=np.log(100)/100,
         steps=100_000)
@@ -25,7 +27,8 @@ def test_q_learning(
         runs: int = 10,
         steps: int = 100_000,
         kl_divergence_coefficient: float|None = None,
-        kl_divergence_target: float|None = None
+        kl_divergence_target: float|None = None,
+        misspecified_reward: float = 13
 ):
 
     config = {
@@ -46,10 +49,13 @@ def test_q_learning(
         "variable_t_inv": config["kl_divergence_target"] is not None,
         "q_cap": q_cap
     }
+    gridworld_config = {
+        "misspecified_reward": misspecified_reward
+    }
 
     outputs = []
     for _ in range(runs):
-        q_learning = QLearning(config=config, adamw_config=adamw_config, q_agent_config=q_agent_config)
+        q_learning = QLearning(config=config, adamw_config=adamw_config, q_agent_config=q_agent_config, gridworld_config=gridworld_config)
         q_learning.train(steps=steps)
 
         outputs.extend(q_learning.outputs)

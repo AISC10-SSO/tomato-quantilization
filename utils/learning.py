@@ -92,6 +92,11 @@ class QAgent(nn.Module):
 
         self.kl_divergence_coefficient = kl_divergence_coefficient
 
+        self.average_reward = 0
+
+    def update_average_reward(self, new_reward: float):
+        self.average_reward = new_reward if self.average_reward == 0 else self.average_reward * 0.9 + new_reward * 0.1
+
     def get_loss(self, data: dict[str, torch.Tensor]):
         """
         Get the loss from a batch of data, containing rewards per state, actions taken, and input states
@@ -107,6 +112,9 @@ class QAgent(nn.Module):
         # Predict the rewards for each state, given the t_inv value
         # This means taking the probabilities of each action and multiplying them by the predicted rewards (Q values)
         # Throw away the first state as we don't know what came before it
+
+        # Calculate and update average reward
+        self.update_average_reward(data["reward"].float().mean().item())
 
         invalid_actions_mask = (~data["action_validity"]).float() * -1e9
         next_state_invalid_actions_mask = (~data["next_state_action_validity"]).float() * -1e9
@@ -126,8 +134,8 @@ class QAgent(nn.Module):
                 mode="deploy",
                 action_validity=data["action_validity"])
 
-            next_values_1 = torch.einsum("ba,ba->b", next_probabilities_1, next_q_values_1)
-            next_values_2 = torch.einsum("ba,ba->b", next_probabilities_2, next_q_values_2)
+            next_values_1 = torch.einsum("ba,ba->b", next_probabilities_1, next_q_values_1 + self.average_reward)
+            next_values_2 = torch.einsum("ba,ba->b", next_probabilities_2, next_q_values_2 + self.average_reward)
 
             reward = data["reward"]
 
@@ -138,8 +146,6 @@ class QAgent(nn.Module):
             target_rewards_2 = reward + self.gamma * next_values_2
 
             if self.kl_divergence_coefficient is not None:
-                next_state_prior = F.softmax(next_state_invalid_actions_mask, dim=-1)
-
                 base_probabilities = F.softmax(next_state_invalid_actions_mask, dim=-1)
 
                 next_kl_divergence_1 = self.safe_kl_div(base_probabilities=base_probabilities, altered_probabilities=next_probabilities_1)
@@ -157,14 +163,12 @@ class QAgent(nn.Module):
                     target_rewards_1 = target_rewards_1 - self.kl_divergence_coefficient * next_kl_divergence_1
                     target_rewards_2 = target_rewards_2 - self.kl_divergence_coefficient * next_kl_divergence_2
 
-
-
         # Calculate losses for both networks
         outputs_1 = self.network_1(data["state"])
         outputs_2 = self.network_2(data["state"])
 
-        predicted_rewards_1 = outputs_1.gather(1, data["action"].unsqueeze(1)).squeeze()
-        predicted_rewards_2 = outputs_2.gather(1, data["action"].unsqueeze(1)).squeeze()
+        predicted_rewards_1 = outputs_1.gather(1, data["action"].unsqueeze(1)).squeeze() + self.average_reward
+        predicted_rewards_2 = outputs_2.gather(1, data["action"].unsqueeze(1)).squeeze() + self.average_reward
 
         # Swap the target rewards for the two networks
         loss_1 = F.smooth_l1_loss(predicted_rewards_1, target_rewards_2)
@@ -262,18 +266,21 @@ class QAgent(nn.Module):
         else:
             action_validity_mask = (~action_validity).float() * -1e9
 
+        average_q = self.average_reward or 0 / (1-self.gamma)
+        adjusted_outputs = outputs + average_q
+
         # Apply temperature scaling if t_inv is provided
         if t_inv is None:
             # If no t_inv, use argmax
             probabilities = torch.zeros_like(outputs)
-            probabilities[torch.arange(outputs.shape[0]), torch.argmax(outputs + action_validity_mask, dim=-1)] = 1
+            probabilities[torch.arange(outputs.shape[0]), torch.argmax(adjusted_outputs + action_validity_mask, dim=-1)] = 1
         else:
             if self.q_cap is None:
                 # If no q_cap, use softmax
-                probabilities = F.softmax(outputs * t_inv + action_validity_mask, dim=-1)
+                probabilities = F.softmax(adjusted_outputs * t_inv + action_validity_mask, dim=-1)
             else:
                 # If q_cap is provided, use capped softmax
-                log_probabilities = -self.safe_log_one_plus_exp(t_inv * (self.q_cap - outputs)) + action_validity_mask
+                log_probabilities = -self.safe_log_one_plus_exp(t_inv * (self.q_cap - adjusted_outputs)) + action_validity_mask
                 probabilities = F.softmax(log_probabilities, dim=-1)
 
         # Clamp negative probabilities
@@ -409,6 +416,11 @@ class QLearning:
                 test_output = self.test_model()
                 print(test_output)
                 self.outputs.append(test_output)
+
+            if step_idx % 10000 == 0 and step_idx > 0:
+                output = self.q_agent.network_1(
+                    self.state_buffer.get_batch()["state"]).mean()
+                print(output + self.q_agent.average_reward / (1-self.q_agent.gamma))
 
     def test_model(self):
         gridworlds = [TomatoGrid(**self.gridworld_config) for _ in range(10)]
