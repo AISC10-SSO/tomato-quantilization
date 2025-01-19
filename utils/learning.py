@@ -17,7 +17,6 @@ class QNetwork(nn.Module):
     def __init__(self, input_channels: int, action_size: int):
         """
         Convolutional Q Network for the tomato gridworld
-        
         """
         super().__init__()
 
@@ -50,7 +49,7 @@ class QNetwork(nn.Module):
         x = F.relu(self.fc1(x))
         return self.fc2(x)
     
-class QAgent:
+class QAgent(nn.Module):
     def __init__(
             self, *,
             input_channels: int = 6,
@@ -62,6 +61,8 @@ class QAgent:
             reward_cap: float|None = None,
             q_cap: float|None = None,
             variable_t_inv: bool = False):
+    
+        super().__init__()
 
         self.input_channels = input_channels
         self.action_size = action_size
@@ -143,7 +144,10 @@ class QAgent:
                 next_kl_divergence_2 = F.kl_div(torch.log(next_probabilities_2), next_state_prior, reduction="none").sum(dim=-1)
 
                 if self.kl_divergence_coefficient == "auto":
-                    t_inv = self.t_inv_deploy.clamp(min=1e-2)
+                    t_inv = self.t_inv_deploy
+
+                    if type(t_inv) == torch.Tensor:
+                        t_inv = t_inv.detach().clamp(min=1e-2)
 
                     target_rewards_1 = target_rewards_1 - next_kl_divergence_1 / t_inv
                     target_rewards_2 = target_rewards_2 - next_kl_divergence_2 / t_inv
@@ -169,9 +173,16 @@ class QAgent:
 
         # Use average of both networks for probabilities and outputs
         outputs = (outputs_1 + outputs_2) / 2
-        probabilities = self.get_probabilities(outputs.detach(), mode="sample", action_validity=data["action_validity"])
 
-        kl_divergence = F.kl_div(torch.log(probabilities), F.softmax(invalid_actions_mask, dim=-1), reduction="none").sum(dim=-1)
+        print(outputs)
+        print(self.t_inv_deploy)
+
+        probabilities = self.get_probabilities(outputs.detach(), mode="deploy", action_validity=data["action_validity"])
+
+        print(probabilities)
+        breakpoint()
+
+        kl_divergence = self.safe_kl_div(base_probabilities=F.softmax(invalid_actions_mask, dim=-1).detach(), altered_probabilities=probabilities)
 
         return {
             "loss": loss,
@@ -250,9 +261,6 @@ class QAgent:
         elif mode == "deploy":
             t_inv = self.t_inv_deploy
 
-        # Subtract the maximum value from each row to prevent overflow
-        outputs = outputs - outputs.max(dim=-1, keepdim=True).values
-
         if action_validity is None:
             action_validity_mask = torch.zeros_like(outputs)
         else:
@@ -290,6 +298,22 @@ class QAgent:
         output[x < threshold] = torch.log(1 + torch.exp(x[x < threshold]))
         output[x >= threshold] = x[x >= threshold]
         return output
+    
+    @staticmethod
+    def safe_kl_div(base_probabilities: torch.Tensor, altered_probabilities: torch.Tensor):
+
+        output = torch.zeros_like(base_probabilities)
+        suitable_indices = (base_probabilities > 1e-3) & (altered_probabilities > 1e-3)
+        output[suitable_indices] = altered_probabilities[suitable_indices] * torch.log(altered_probabilities[suitable_indices] / base_probabilities[suitable_indices])
+
+        print(output.shape)
+        print(output.sum(dim=-1))
+
+        print(base_probabilities)
+        print(altered_probabilities)
+
+        return output.sum(dim=-1)
+
 
 class StateBuffer:
     def __init__(self, buffer_size: int, batch_size: int):
@@ -335,8 +359,7 @@ class QLearning:
 
         self.q_agent = QAgent(**q_agent_config)
 
-        self.optimizer_1 = torch.optim.AdamW(self.q_agent.network_1.parameters(), **adamw_config)
-        self.optimizer_2 = torch.optim.AdamW(self.q_agent.network_2.parameters(), **adamw_config)
+        self.optimizer = torch.optim.AdamW(self.q_agent.parameters(), **adamw_config)
 
         self.outputs = []
 
@@ -362,7 +385,6 @@ class QLearning:
             action_idx = self.q_agent.get_action(state = state.unsqueeze(0), action_validity=dict_["action_validity"], mode="sample")
             dict_["action"] = torch.tensor(action_idx)
 
-
             action = list(Action)[action_idx]
             output = gridworld.update_grid(action)
 
@@ -376,24 +398,19 @@ class QLearning:
                 for _ in range(10):
                     loss_output = self.q_agent.get_loss(self.state_buffer.get_batch())
 
-                    self.optimizer_1.zero_grad()
-                    self.optimizer_2.zero_grad()
+                    self.optimizer.zero_grad()
                     loss = loss_output["loss"]
 
                     if self.config["kl_divergence_target"] is not None:
                         kl_divergence = loss_output["kl_divergence"]
-                        kl_divergence_loss = F.smooth_l1_loss(
-                            kl_divergence.mean() / self.config["kl_divergence_target"],
-                            torch.tensor(1.0))
+                        kl_divergence_loss = F.relu(kl_divergence.mean() / self.config["kl_divergence_target"] - 1)
                         loss += kl_divergence_loss
 
                     loss.backward()
 
-                    nn.utils.clip_grad_norm_(self.q_agent.network_1.parameters(), max_norm=1.0)
-                    nn.utils.clip_grad_norm_(self.q_agent.network_2.parameters(), max_norm=1.0)
+                    nn.utils.clip_grad_norm_(self.q_agent.parameters(), max_norm=1.0)
 
-                    self.optimizer_1.step()
-                    self.optimizer_2.step()
+                    self.optimizer.step()
                 
                     self.q_agent.update_target_network(tau=0.01)
 
@@ -406,7 +423,6 @@ class QLearning:
         gridworlds = [TomatoGrid(**self.gridworld_config) for _ in range(10)]
 
         outputs = []
-        kl_divergences = []
 
         for _ in range(100):
             state = torch.stack([gridworld.get_state_tensor() for gridworld in gridworlds])

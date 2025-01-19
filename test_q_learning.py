@@ -12,9 +12,7 @@ def main():
         t_inv_sample=1/13,
         gamma=0.99,
         runs=1,
-        q_cap=0.61*13,
         kl_divergence_coefficient="auto",
-        kl_divergence_target=np.log(100)/100,
         steps=100_000)
 
 def test_q_learning(
