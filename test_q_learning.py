@@ -62,7 +62,7 @@ def main():
 
         run_test(
             repeats=3, 
-            save_path=f"Q Learning/Data/soft_q_learning_with_high_reward_hack_{misspecified_reward_value}.csv",
+            save_path=f"Q Learning/Data/soft_q_learning_q_cap_misspecified_reward_{misspecified_reward_value}.csv",
             fixed_kwargs={
                 "gamma": 0.99,
                 "steps": 100_000,
@@ -80,7 +80,7 @@ def main():
 
     run_test(
         repeats=3, 
-        save_path="Q Learning/Data/soft_q_learning_with_high_reward_hack.csv",
+        save_path="Q Learning/Data/soft_q_learning_misspecified_reward_20.csv",
         fixed_kwargs={
             "gamma": 0.99,
             "steps": 100_000,
@@ -134,17 +134,14 @@ def run_test(
 
     final_dfs = []
     for kwarg_product in variable_kwargs_gathered:
+        print(kwarg_product)
         kwargs = {key: value for key, value in zip(variable_kwargs.keys(), kwarg_product)}
         for key, value in fixed_kwargs.items():
             kwargs[key] = value
 
-        dfs = []
+        df_out, config_dict = test_q_learning(runs=repeats, **kwargs)
 
-        for _ in range(repeats):
-            df_out, config_dict = test_q_learning(**kwargs)
-            dfs.append(df_out)
-
-        processed_df = process_df(dfs, config_dict)
+        processed_df = process_df(df_out, config_dict)
 
         final_dfs.append(processed_df)
 
