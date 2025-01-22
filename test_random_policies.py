@@ -211,30 +211,5 @@ def save_policy_datapoints(
 
     return
 
-def sample_random_policy(steps: int = 100, iterations: int = 0, invalid_action_setting: InvalidActionSetting = InvalidActionSetting.WAIT):
-    grid = TomatoGrid(invalid_action_setting=invalid_action_setting)
-
-    total_true_utility = 0
-    total_misspecified_reward = 0
-    total_on_tomato = 0
-
-    if iterations > 0:
-        sequence, _ = iterative_complexity_reduction(length=steps, iterations=iterations)
-    else:
-        sequence = [random.choice(list(Action)) for _ in range(steps)]
-
-    for action in sequence:
-        step_output = grid.update_grid(Action(action))
-        total_true_utility += step_output.true_utility
-        total_misspecified_reward += step_output.misspecified_reward
-        total_on_tomato += step_output.on_tomato
-
-    average_true_utility = total_true_utility / steps
-    average_misspecified_reward = total_misspecified_reward / steps
-    average_on_tomato = total_on_tomato / steps
-
-    return average_true_utility, average_misspecified_reward, average_on_tomato
-
-
 if __name__ == "__main__":
     main()

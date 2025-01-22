@@ -81,7 +81,7 @@ class TomatoGrid:
             tomato_updates: list[tuple[int, int]]|None = None,
             agent_position: tuple[int, int] = (3, 3),
             invalid_action_setting: InvalidActionSetting = InvalidActionSetting.WAIT,
-            misspecified_reward: int = 13,
+            misspecified_reward_value: int = 13,
     ):
         self.grid_state = grid_state
         if tomato_updates is None:
@@ -91,7 +91,7 @@ class TomatoGrid:
         self.time_step = 0
         self.agent_position = agent_position
         self.invalid_action_setting = invalid_action_setting
-        self.misspecified_reward = misspecified_reward
+        self.misspecified_reward_value = misspecified_reward_value
 
     def get_tomato_updates(self, time_step: int) -> tuple[int, int] | None:
         return self.tomato_updates[time_step]
@@ -163,7 +163,7 @@ class TomatoGrid:
                     true_utility += 1
 
         if self.grid_state[self.agent_position[0]][self.agent_position[1]] == "O":
-            misspecified_reward = self.misspecified_reward
+            misspecified_reward = self.misspecified_reward_value
 
         return {"true_utility": true_utility, "misspecified_reward": misspecified_reward}
     
@@ -362,3 +362,39 @@ def iterative_complexity_reduction(length=1000, iterations=5):
             break
     
     return best_sequence, best_complexity
+
+def sample_random_policy(
+        steps: int = 100, 
+        iterations: int = 0, 
+        invalid_action_setting: InvalidActionSetting = InvalidActionSetting.WAIT,
+        misspecified_reward_value: int = 13,
+    ):
+    """
+    Sample a random policy for a given number of steps
+    """
+
+    grid = TomatoGrid(
+        invalid_action_setting=invalid_action_setting,
+        misspecified_reward_value=misspecified_reward_value,
+    )
+
+    total_true_utility = 0
+    total_misspecified_reward = 0
+    total_on_tomato = 0
+
+    if iterations > 0:
+        sequence, _ = iterative_complexity_reduction(length=steps, iterations=iterations)
+    else:
+        sequence = [random.choice(list(Action)) for _ in range(steps)]
+
+    for action in sequence:
+        step_output = grid.update_grid(Action(action))
+        total_true_utility += step_output.true_utility
+        total_misspecified_reward += step_output.misspecified_reward
+        total_on_tomato += step_output.on_tomato
+
+    average_true_utility = total_true_utility / steps
+    average_misspecified_reward = total_misspecified_reward / steps
+    average_on_tomato = total_on_tomato / steps
+
+    return average_true_utility, average_misspecified_reward, average_on_tomato

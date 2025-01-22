@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+from tqdm import tqdm
 
 import random
 import logging
@@ -56,7 +57,7 @@ class QAgent(nn.Module):
             action_size: int = 5,
             gamma: float = 1.99,
             kl_divergence_coefficient: float|None|Literal["auto"] = None,
-            t_inv_sample: float|None = None,
+            t_inv_sample: float|None|Literal["auto"] = None,
             t_inv_deploy: float|None = None,
             reward_cap: float|None = None,
             q_cap: float|None = None,
@@ -113,9 +114,6 @@ class QAgent(nn.Module):
         # This means taking the probabilities of each action and multiplying them by the predicted rewards (Q values)
         # Throw away the first state as we don't know what came before it
 
-        # Calculate and update average reward
-        self.update_average_reward(data["reward"].float().mean().item())
-
         invalid_actions_mask = (~data["action_validity"]).float() * -1e9
         next_state_invalid_actions_mask = (~data["next_state_action_validity"]).float() * -1e9
 
@@ -145,6 +143,8 @@ class QAgent(nn.Module):
             target_rewards_1 = reward + self.gamma * next_values_1
             target_rewards_2 = reward + self.gamma * next_values_2
 
+            average_reward = torch.mean(reward.float()).item()
+
             if self.kl_divergence_coefficient is not None:
                 base_probabilities = F.softmax(next_state_invalid_actions_mask, dim=-1)
 
@@ -157,11 +157,15 @@ class QAgent(nn.Module):
                     if type(t_inv) == torch.Tensor:
                         t_inv = t_inv.clamp(min=1e-1)
 
-                    target_rewards_1 = target_rewards_1 - next_kl_divergence_1 / t_inv
-                    target_rewards_2 = target_rewards_2 - next_kl_divergence_2 / t_inv
                 else:
-                    target_rewards_1 = target_rewards_1 - self.kl_divergence_coefficient * next_kl_divergence_1
-                    target_rewards_2 = target_rewards_2 - self.kl_divergence_coefficient * next_kl_divergence_2
+                    t_inv = 1 / min(self.kl_divergence_coefficient, 1e-1)
+
+                target_rewards_1 = target_rewards_1 - next_kl_divergence_1 / t_inv
+                target_rewards_2 = target_rewards_2 - next_kl_divergence_2 / t_inv
+
+                average_reward -= (torch.mean(next_kl_divergence_1 / t_inv).item() + torch.mean(next_kl_divergence_2 / t_inv).item()) / 2
+
+        self.update_average_reward(average_reward)
 
         # Calculate losses for both networks
         outputs_1 = self.network_1(data["state"])
@@ -256,9 +260,9 @@ class QAgent(nn.Module):
         """
 
         # Mask out invalid actions
-        if mode == "sample":
+        if mode == "sample" and self.t_inv_sample != "auto":
             t_inv = self.t_inv_sample
-        elif mode == "deploy":
+        else:
             t_inv = self.t_inv_deploy
 
         if action_validity is None:
@@ -267,6 +271,7 @@ class QAgent(nn.Module):
             action_validity_mask = (~action_validity).float() * -1e9
 
         average_q = self.average_reward or 0 / (1-self.gamma)
+
         adjusted_outputs = outputs + average_q
 
         # Apply temperature scaling if t_inv is provided
@@ -371,7 +376,7 @@ class QLearning:
         
         gridworld = TomatoGrid(**self.gridworld_config)
 
-        for step_idx in range(steps):
+        for step_idx in tqdm(range(steps)):
             dict_ = {}
             
             state = gridworld.get_state_tensor()
@@ -414,13 +419,7 @@ class QLearning:
 
             if step_idx % 1000 == 0:
                 test_output = self.test_model()
-                print(test_output)
                 self.outputs.append(test_output)
-
-            if step_idx % 10000 == 0 and step_idx > 0:
-                output = self.q_agent.network_1(
-                    self.state_buffer.get_batch()["state"]).mean()
-                print(output + self.q_agent.average_reward / (1-self.q_agent.gamma))
 
     def test_model(self):
         gridworlds = [TomatoGrid(**self.gridworld_config) for _ in range(10)]
