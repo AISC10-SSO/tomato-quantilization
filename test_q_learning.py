@@ -11,6 +11,7 @@ from tqdm import tqdm
 def main():
     torch.set_default_device(device)
 
+    # Basic boltzmann sampling
     run_test(
         repeats=3, 
         save_path="Q Learning/Data/only_boltzmann_sampling.csv",
@@ -24,6 +25,8 @@ def main():
         }
     )
 
+
+    # Boltzmann sampling + kl divergence penalty with coefficient = temperature
     run_test(
         repeats=3, 
         save_path="Q Learning/Data/soft_q_learning.csv",
@@ -38,6 +41,23 @@ def main():
         }
     )
 
+    # Soft q-learning works less well when the reward hack is higher
+    run_test(
+        repeats=3, 
+        save_path="Q Learning/Data/soft_q_learning_misspecified_reward_20.csv",
+        fixed_kwargs={
+            "gamma": 0.99,
+            "steps": 100_000,
+            "t_inv_sample": 1/13,
+            "kl_divergence_coefficient": "auto",
+            "misspecified_reward_value": 20
+        },
+        variable_kwargs={
+            "t_inv_train_deploy": [0.1/13, 0.2/13, 0.5/13, 1/13, 1.5/13, 2/13, 3/13, 5/13],
+        }
+    )
+
+    # Generate quantile data so that we can use it for the quantilization method
     generate_quantile_data(
         path="Q Learning/Data/quantile_data_misspecified_reward_13.csv",
         misspecified_reward_value=13,
@@ -51,6 +71,7 @@ def main():
         runs=10_000
     )
 
+    # Do quantilization!!
     quantiles = [0.5, 0.1, 0.02, 0.005, 0.001]
     kl_divergence_targets = [np.log(1/quantile)/100 for quantile in quantiles]
 
@@ -77,21 +98,6 @@ def main():
             },
             variable_kwarg_gather_type = "zip"
         )
-
-    run_test(
-        repeats=3, 
-        save_path="Q Learning/Data/soft_q_learning_misspecified_reward_20.csv",
-        fixed_kwargs={
-            "gamma": 0.99,
-            "steps": 100_000,
-            "t_inv_sample": 1/13,
-            "kl_divergence_coefficient": "auto",
-            "misspecified_reward_value": 20
-        },
-        variable_kwargs={
-            "t_inv_train_deploy": [0.1/13, 0.2/13, 0.5/13, 1/13, 1.5/13, 2/13, 3/13, 5/13],
-        }
-    )
 
 def generate_quantile_data(path: str, misspecified_reward_value: float, timesteps: int, runs: int):
     if os.path.exists(path):
@@ -134,7 +140,6 @@ def run_test(
 
     final_dfs = []
     for kwarg_product in variable_kwargs_gathered:
-        print(kwarg_product)
         kwargs = {key: value for key, value in zip(variable_kwargs.keys(), kwarg_product)}
         for key, value in fixed_kwargs.items():
             kwargs[key] = value

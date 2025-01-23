@@ -94,9 +94,7 @@ class QAgent(nn.Module):
         self.kl_divergence_coefficient = kl_divergence_coefficient
 
         self.average_reward = 0
-
-    def update_average_reward(self, new_reward: float):
-        self.average_reward = new_reward if self.average_reward == 0 else self.average_reward * 0.9 + new_reward * 0.1
+        self.average_kl_divergence = 0
 
     def get_loss(self, data: dict[str, torch.Tensor]):
         """
@@ -145,25 +143,14 @@ class QAgent(nn.Module):
 
             average_reward = torch.mean(reward.float()).item()
 
-            if self.kl_divergence_coefficient is not None:
+            if (kl_coefficient := self.get_kl_divergence_coefficient()) is not None:
                 base_probabilities = F.softmax(next_state_invalid_actions_mask, dim=-1)
 
                 next_kl_divergence_1 = self.safe_kl_div(base_probabilities=base_probabilities, altered_probabilities=next_probabilities_1)
                 next_kl_divergence_2 = self.safe_kl_div(base_probabilities=base_probabilities, altered_probabilities=next_probabilities_2)
 
-                if self.kl_divergence_coefficient == "auto":
-                    t_inv = self.t_inv_deploy
-
-                    if type(t_inv) == torch.Tensor:
-                        t_inv = t_inv.clamp(min=1e-1)
-
-                else:
-                    t_inv = 1 / min(self.kl_divergence_coefficient, 1e-1)
-
-                target_rewards_1 = target_rewards_1 - next_kl_divergence_1 / t_inv
-                target_rewards_2 = target_rewards_2 - next_kl_divergence_2 / t_inv
-
-                average_reward -= (torch.mean(next_kl_divergence_1 / t_inv).item() + torch.mean(next_kl_divergence_2 / t_inv).item()) / 2
+                target_rewards_1 = target_rewards_1 - next_kl_divergence_1 * kl_coefficient
+                target_rewards_2 = target_rewards_2 - next_kl_divergence_2 * kl_coefficient
 
         self.update_average_reward(average_reward)
 
@@ -187,6 +174,8 @@ class QAgent(nn.Module):
         probabilities = self.get_probabilities(outputs.detach(), mode="deploy", action_validity=data["action_validity"])
 
         kl_divergence = self.safe_kl_div(base_probabilities=F.softmax(invalid_actions_mask, dim=-1).detach(), altered_probabilities=probabilities)
+
+        self.update_average_kl_divergence(kl_divergence.mean().item())
 
         return {
             "loss": loss,
@@ -271,8 +260,13 @@ class QAgent(nn.Module):
             action_validity_mask = (~action_validity).float() * -1e9
 
         average_q = self.average_reward or 0 / (1-self.gamma)
-
         adjusted_outputs = outputs + average_q
+
+        # Q cap should be adjusted by the penalized kl divergence
+        average_kl_divergence = self.average_kl_divergence or 0 / (1-self.gamma)
+        if (kl_coefficient := self.get_kl_divergence_coefficient()) is not None: # I am the walrus
+            adjusted_outputs = adjusted_outputs + average_kl_divergence * kl_coefficient
+
 
         # Apply temperature scaling if t_inv is provided
         if t_inv is None:
@@ -299,6 +293,28 @@ class QAgent(nn.Module):
             probabilities = torch.ones_like(probabilities)
 
         return probabilities
+    
+
+    def update_average_reward(self, new_reward: float):
+        self.average_reward = new_reward if self.average_reward == 0 else self.average_reward * 0.9 + new_reward * 0.1
+    
+    def update_average_kl_divergence(self, new_kl_divergence: float):
+        self.average_kl_divergence = new_kl_divergence if self.average_kl_divergence == 0 else self.average_kl_divergence * 0.9 + new_kl_divergence * 0.1
+
+    def get_kl_divergence_coefficient(self):
+        if self.kl_divergence_coefficient is None:
+            return None
+        
+        if self.kl_divergence_coefficient != "auto":
+            return max(self.kl_divergence_coefficient, 1e2)
+        
+        t_inv = self.t_inv_deploy
+
+        if type(t_inv) == torch.Tensor:
+            t_inv = t_inv
+
+        return 1/min(t_inv, 1e-2)
+
     
     @staticmethod
     def safe_log_one_plus_exp(x: torch.Tensor, threshold: float = 5):
