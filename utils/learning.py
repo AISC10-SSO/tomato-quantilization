@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 class QNetwork(nn.Module):
 
-    def __init__(self, input_channels: int, action_size: int):
+    def __init__(self, input_channels: int, action_size: int, model_kl: bool = False):
         """
         Convolutional Q Network for the tomato gridworld
         """
@@ -26,7 +26,12 @@ class QNetwork(nn.Module):
         self.conv2 = nn.Conv2d(32, 64, kernel_size=3, stride=1)
         self.bn2 = nn.BatchNorm2d(64)
         self.fc1 = nn.Linear(64, 512)
-        self.fc2 = nn.Linear(512, action_size)
+        self.fc_q = nn.Linear(512, action_size)
+
+        self.model_kl = model_kl
+
+        if self.model_kl:
+            self.fc_kl = nn.Linear(512, action_size)
 
         self.reward_so_far_projection = nn.Linear(1, 64, bias=False)
 
@@ -48,7 +53,14 @@ class QNetwork(nn.Module):
             x = x + self.reward_so_far_projection(reward_so_far)
 
         x = F.relu(self.fc1(x))
-        return self.fc2(x)
+
+        output = {"q": self.fc_q(x)}
+
+        if self.model_kl:
+            output["kl"] = self.fc_kl(x)
+
+        return output
+
     
 class QAgent(nn.Module):
     def __init__(
@@ -67,9 +79,10 @@ class QAgent(nn.Module):
 
         self.input_channels = input_channels
         self.action_size = action_size
-
-        self.network_1 = QNetwork(input_channels, action_size)
-        self.network_2 = QNetwork(input_channels, action_size)
+        self.model_kl = kl_divergence_coefficient is not None
+    
+        self.network_1 = QNetwork(input_channels, action_size, model_kl=self.model_kl)
+        self.network_2 = QNetwork(input_channels, action_size, model_kl=self.model_kl)
 
         self.gamma = gamma
 
@@ -85,8 +98,8 @@ class QAgent(nn.Module):
         self.q_cap = None if q_cap is None else (1/(1-gamma)) * q_cap
 
         # Create two target networks
-        self.target_network_1 = QNetwork(input_channels, action_size)
-        self.target_network_2 = QNetwork(input_channels, action_size)
+        self.target_network_1 = QNetwork(input_channels, action_size, model_kl=self.model_kl)
+        self.target_network_2 = QNetwork(input_channels, action_size, model_kl=self.model_kl)
         
         self.target_network_1.load_state_dict(self.network_1.state_dict())
         self.target_network_2.load_state_dict(self.network_2.state_dict())
@@ -95,6 +108,8 @@ class QAgent(nn.Module):
 
         self.average_reward = 0
         self.average_kl_divergence = 0
+
+        self.print_info = False
 
     def get_loss(self, data: dict[str, torch.Tensor]):
         """
@@ -117,65 +132,88 @@ class QAgent(nn.Module):
 
         with torch.no_grad():
             # Get Q-values from both target networks
-            next_q_values_1 = self.target_network_1(data["next_state"])
-            next_q_values_2 = self.target_network_2(data["next_state"])
+            next_outputs_1 = self.target_network_1(data["next_state"])
+            next_outputs_2 = self.target_network_2(data["next_state"])
             
             next_probabilities_1 = self.get_probabilities(
-                next_q_values_1 + next_state_invalid_actions_mask,
+                next_outputs_1,
                 mode="deploy",
                 action_validity=data["action_validity"])
             
             next_probabilities_2 = self.get_probabilities(
-                next_q_values_2 + next_state_invalid_actions_mask,
+                next_outputs_2,
                 mode="deploy",
                 action_validity=data["action_validity"])
 
-            next_values_1 = torch.einsum("ba,ba->b", next_probabilities_1, next_q_values_1 + self.average_reward)
-            next_values_2 = torch.einsum("ba,ba->b", next_probabilities_2, next_q_values_2 + self.average_reward)
+            estimated_future_q_1 = torch.einsum("ba,ba->b", next_probabilities_1, next_outputs_1["q"])
+            estimated_future_q_2 = torch.einsum("ba,ba->b", next_probabilities_2, next_outputs_2["q"])
 
-            reward = data["reward"]
+            reward = data["reward"].float()
 
             if self.reward_cap is not None:
                 reward = reward.clamp(max=self.reward_cap)
 
-            target_rewards_1 = reward + self.gamma * next_values_1
-            target_rewards_2 = reward + self.gamma * next_values_2
+            reward_centered = reward - self.average_reward
 
-            average_reward = torch.mean(reward.float()).item()
+            target_q_1 = reward_centered + self.gamma * estimated_future_q_1
+            target_q_2 = reward_centered + self.gamma * estimated_future_q_2
 
-            if (kl_coefficient := self.get_kl_divergence_coefficient()) is not None:
+            if self.model_kl:
+
                 base_probabilities = F.softmax(next_state_invalid_actions_mask, dim=-1)
 
-                next_kl_divergence_1 = self.safe_kl_div(base_probabilities=base_probabilities, altered_probabilities=next_probabilities_1)
-                next_kl_divergence_2 = self.safe_kl_div(base_probabilities=base_probabilities, altered_probabilities=next_probabilities_2)
+                estimated_future_kl_1 = torch.einsum("ba,ba->b", next_probabilities_1, next_outputs_1["kl"])
+                estimated_future_kl_2 = torch.einsum("ba,ba->b", next_probabilities_2, next_outputs_2["kl"])
 
-                target_rewards_1 = target_rewards_1 - next_kl_divergence_1 * kl_coefficient
-                target_rewards_2 = target_rewards_2 - next_kl_divergence_2 * kl_coefficient
+                kl_1 = self.safe_kl_div(base_probabilities=base_probabilities, altered_probabilities=next_probabilities_1)
+                kl_2 = self.safe_kl_div(base_probabilities=base_probabilities, altered_probabilities=next_probabilities_2)
 
-        self.update_average_reward(average_reward)
+                kl_1_centered = kl_1 - self.average_kl_divergence
+                kl_2_centered = kl_2 - self.average_kl_divergence
+
+                target_kl_1 = kl_1_centered + self.gamma * estimated_future_kl_1
+                target_kl_2 = kl_2_centered + self.gamma * estimated_future_kl_2
+
+                self.update_average_kl_divergence(kl_1.mean().item())
+                self.update_average_kl_divergence(kl_2.mean().item())
+
+            self.update_average_reward(reward.mean().item())
+
+        if self.print_info:
+            print(f"Average reward: {self.average_reward}")
 
         # Calculate losses for both networks
         outputs_1 = self.network_1(data["state"])
         outputs_2 = self.network_2(data["state"])
 
-        predicted_rewards_1 = outputs_1.gather(1, data["action"].unsqueeze(1)).squeeze() + self.average_reward
-        predicted_rewards_2 = outputs_2.gather(1, data["action"].unsqueeze(1)).squeeze() + self.average_reward
+        predicted_q_1 = outputs_1["q"].gather(1, data["action"].unsqueeze(1)).squeeze()
+        predicted_q_2 = outputs_2["q"].gather(1, data["action"].unsqueeze(1)).squeeze()
 
         # Swap the target rewards for the two networks
-        loss_1 = F.smooth_l1_loss(predicted_rewards_1, target_rewards_2)
-        loss_2 = F.smooth_l1_loss(predicted_rewards_2, target_rewards_1)
+        loss_1 = F.smooth_l1_loss(predicted_q_1, target_q_2)
+        loss_2 = F.smooth_l1_loss(predicted_q_2, target_q_1) 
+
+        if self.kl_divergence_coefficient is not None:
+            predicted_kl_1 = outputs_1["kl"].gather(1, data["action"].unsqueeze(1)).squeeze()
+            predicted_kl_2 = outputs_2["kl"].gather(1, data["action"].unsqueeze(1)).squeeze()
+
+            loss_1 = loss_1 + F.smooth_l1_loss(predicted_kl_1, target_kl_2)
+            loss_2 = loss_2 + F.smooth_l1_loss(predicted_kl_2, target_kl_1)
 
         # Total loss is the sum of both networks' losses
         loss = loss_1 + loss_2
 
         # Use average of both networks for probabilities and outputs
-        outputs = (outputs_1 + outputs_2) / 2
+        outputs = {
+            k: (outputs_1[k] + outputs_2[k]) / 2
+            for k in outputs_1.keys()
+        }
 
-        probabilities = self.get_probabilities(outputs.detach(), mode="deploy", action_validity=data["action_validity"])
+        probabilities = self.get_probabilities(outputs, mode="deploy", action_validity=data["action_validity"]).detach()
 
-        kl_divergence = self.safe_kl_div(base_probabilities=F.softmax(invalid_actions_mask, dim=-1).detach(), altered_probabilities=probabilities)
-
-        self.update_average_kl_divergence(kl_divergence.mean().item())
+        kl_divergence = self.safe_kl_div(
+            base_probabilities=F.softmax(invalid_actions_mask, dim=-1).detach(),
+            altered_probabilities=probabilities)
 
         return {
             "loss": loss,
@@ -199,7 +237,14 @@ class QAgent(nn.Module):
         Returns:
             int: Action to take
         """
-        outputs = (self.network_1(state) + self.network_2(state)) / 2
+        output_1 = self.network_1(state)
+        output_2 = self.network_2(state)
+
+        outputs = {
+            k: (output_1[k] + output_2[k]) / 2
+            for k in output_1.keys()
+        }
+
         probabilities = self.get_probabilities(outputs, mode=mode, action_validity=action_validity)
         # Choose randomly
 
@@ -214,7 +259,7 @@ class QAgent(nn.Module):
         else:
             return output.flatten().tolist()
     
-    def update_target_network(self, tau: float):
+    def update_target_network(self, tau: float = 0.5):
         """
         Update the target network with exponential moving average, using the current network's parameters
 
@@ -232,12 +277,12 @@ class QAgent(nn.Module):
             self.target_network_2.state_dict()[name].copy_(
                 self.target_network_2.state_dict()[name] * (1-tau) + param * tau)
         
-    def get_probabilities(self, outputs: torch.Tensor, mode: Literal["sample", "deploy"], action_validity: torch.Tensor|None = None):
+    def get_probabilities(self, outputs: dict[str, torch.Tensor], mode: Literal["sample", "deploy"], action_validity: torch.Tensor|None = None):
         """
         Get the probabilities from the network, can use softmax, max, or capped softmax
 
         Args:
-            outputs (torch.Tensor): Outputs from the network of shape (batch_size, action_size)
+            outputs (dict[str, torch.Tensor]): Outputs from the network of shape (batch_size, action_size)
             mode (Literal["sample", "train", "deploy"]): Mode to use for the softmax
             action_validity (torch.Tensor|None): Action validity mask of shape (batch_size, action_size)
 
@@ -255,65 +300,60 @@ class QAgent(nn.Module):
             t_inv = self.t_inv_deploy
 
         if action_validity is None:
-            action_validity_mask = torch.zeros_like(outputs)
+            action_validity_mask = torch.zeros_like(outputs["q"])
         else:
             action_validity_mask = (~action_validity).float() * -1e9
 
-        average_q = self.average_reward or 0 / (1-self.gamma)
-        adjusted_outputs = outputs + average_q
+        average_q = (self.average_reward or 0) / (1-self.gamma)
+        adjusted_q_outputs = outputs["q"] + average_q
 
-        # Q cap should be adjusted by the penalized kl divergence
-        average_kl_divergence = self.average_kl_divergence or 0 / (1-self.gamma)
-        if (kl_coefficient := self.get_kl_divergence_coefficient()) is not None: # I am the walrus
-            adjusted_outputs = adjusted_outputs + average_kl_divergence * kl_coefficient
-
+        if self.print_info:
+            print(f"Average q: {average_q}")
+            print(f"Average non-adjusted output: {outputs['q'].mean()}")
+            print(f"Average output: {adjusted_q_outputs.mean()}")
 
         # Apply temperature scaling if t_inv is provided
         if t_inv is None:
             # If no t_inv, use argmax
             probabilities = torch.zeros_like(outputs)
-            probabilities[torch.arange(outputs.shape[0]), torch.argmax(adjusted_outputs + action_validity_mask, dim=-1)] = 1
+            probabilities[torch.arange(outputs.shape[0]), torch.argmax(adjusted_q_outputs + action_validity_mask, dim=-1)] = 1
         else:
             if self.q_cap is None:
                 # If no q_cap, use softmax
-                probabilities = F.softmax(adjusted_outputs * t_inv + action_validity_mask, dim=-1)
+                probabilities = self.safe_exp_logits(adjusted_q_outputs * t_inv + action_validity_mask)
             else:
                 # If q_cap is provided, use capped softmax
-                log_probabilities = -self.safe_log_one_plus_exp(t_inv * (self.q_cap - adjusted_outputs)) + action_validity_mask
-                probabilities = F.softmax(log_probabilities, dim=-1)
+                log_probabilities = -self.safe_log_one_plus_exp(t_inv * (self.q_cap - adjusted_q_outputs)) + action_validity_mask
+                probabilities = self.safe_exp_logits(log_probabilities)
 
-        # Clamp negative probabilities
-        if probabilities.max() < 0:
-            logger.warning("Negative probability detected")
-            probabilities = probabilities.clamp(min=0)
+        if self.model_kl:
+            # Use the expected future KL divergence to scale the probabilities
+            # Less KL divergence = more likely to take the action
+            relative_probabilties = self.safe_exp_logits(-outputs["kl"])
+            probabilities = probabilities * relative_probabilties
 
-        # Clamp NaN or inf probabilities
-        if probabilities.isnan().any() or probabilities.isinf().any():
-            logger.warning("NaN or inf probability detected")
-            probabilities = torch.ones_like(probabilities)
-
-        return probabilities
+        return self.normalize_probabilities(probabilities)
     
 
-    def update_average_reward(self, new_reward: float):
-        self.average_reward = new_reward if self.average_reward == 0 else self.average_reward * 0.9 + new_reward * 0.1
+    def update_average_reward(self, new_reward: float, tau: float = 0.5):
+        self.average_reward = new_reward if self.average_reward == 0 else self.average_reward * (1-tau) + new_reward * tau
     
-    def update_average_kl_divergence(self, new_kl_divergence: float):
-        self.average_kl_divergence = new_kl_divergence if self.average_kl_divergence == 0 else self.average_kl_divergence * 0.9 + new_kl_divergence * 0.1
+    def update_average_kl_divergence(self, new_kl_divergence: float, tau: float = 0.5):
+        self.average_kl_divergence = new_kl_divergence if self.average_kl_divergence == 0 else self.average_kl_divergence * (1-tau) + new_kl_divergence * tau
 
     def get_kl_divergence_coefficient(self):
         if self.kl_divergence_coefficient is None:
             return None
         
         if self.kl_divergence_coefficient != "auto":
-            return max(self.kl_divergence_coefficient, 1e2)
+            return min(self.kl_divergence_coefficient, 1e2)
         
         t_inv = self.t_inv_deploy
 
         if type(t_inv) == torch.Tensor:
             t_inv = t_inv
 
-        return 1/min(t_inv, 1e-2)
+        return 1/max(t_inv, 1e-2)
 
     
     @staticmethod
@@ -331,6 +371,17 @@ class QAgent(nn.Module):
         output[suitable_indices] = altered_probabilities[suitable_indices] * torch.log(altered_probabilities[suitable_indices] / base_probabilities[suitable_indices])
 
         return output.sum(dim=-1)
+    
+    @staticmethod
+    def safe_exp_logits(x: torch.Tensor, threshold: float = 5):
+
+        x = x - torch.max(x, dim=-1, keepdim=True).values.detach()
+
+        return x.exp()
+    
+    @staticmethod
+    def normalize_probabilities(probabilities: torch.Tensor):
+        return probabilities / probabilities.sum(dim=-1, keepdim=True)
 
 
 class StateBuffer:
@@ -436,6 +487,11 @@ class QLearning:
             if step_idx % 1000 == 0:
                 test_output = self.test_model()
                 self.outputs.append(test_output)
+                """
+                print(test_output)
+                print(f"Average reward: {self.q_agent.average_reward}")
+                print(f"Average kl divergence: {self.q_agent.average_kl_divergence}")
+                """
 
     def test_model(self):
         gridworlds = [TomatoGrid(**self.gridworld_config) for _ in range(10)]
@@ -449,9 +505,7 @@ class QLearning:
             actions = [list(Action)[action_idx] for action_idx in action_indices]
             outputs += [gridworld.update_grid(action) for gridworld, action in zip(gridworlds, actions)]
 
-
         misspecified_reward = np.mean([output.misspecified_reward for output in outputs])
         true_utility = np.mean([output.true_utility for output in outputs])
-
 
         return {"misspecified_reward": misspecified_reward, "true_utility": true_utility}

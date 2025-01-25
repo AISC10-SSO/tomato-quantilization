@@ -1,6 +1,7 @@
 from utils import device, sample_random_policy
 from utils.learning import QLearning
 import numpy as np
+import matplotlib.pyplot as plt
 import torch
 import pandas as pd
 from itertools import chain, product
@@ -26,7 +27,7 @@ def main():
     )
 
 
-    # Boltzmann sampling + kl divergence penalty with coefficient = temperature
+    # Boltzmann sampling + kl divergence penalty
     run_test(
         repeats=3, 
         save_path="Q Learning/Data/soft_q_learning.csv",
@@ -72,31 +73,27 @@ def main():
     )
 
     # Do quantilization!!
-    quantiles = [0.5, 0.1, 0.02, 0.005, 0.001]
-    kl_divergence_targets = [np.log(1/quantile)/100 for quantile in quantiles]
+    quantiles = [0.001] #[0.5, 0.1, 0.02, 0.005, 0.001]
+    # kl_divergence_targets = [np.log(1/quantile)/np.sqrt(100) for quantile in quantiles]
 
-    for misspecified_reward_value in [13, 20]:
+    for misspecified_reward_value in [13]:
         quantile_data = pd.read_csv(f"Q Learning/Data/quantile_data_misspecified_reward_{misspecified_reward_value}.csv")
-        quantile_data = quantile_data.sort_values(by="misspecified_reward", ascending=False).reset_index(drop=True)
+        quantile_data = quantile_data.sort_values(by="misspecified_reward", ascending=True).reset_index(drop=True)
 
-        misspecified_reward_thresholds = [quantile_data["misspecified_reward"][int(len(quantile_data) * quantile)] for quantile in quantiles]
+        misspecified_reward_thresholds = [quantile_data["misspecified_reward"][int(len(quantile_data) * (1-quantile))] for quantile in quantiles]
 
         run_test(
-            repeats=3, 
+            repeats=1, 
             save_path=f"Q Learning/Data/soft_q_learning_q_cap_misspecified_reward_{misspecified_reward_value}.csv",
             fixed_kwargs={
                 "gamma": 0.99,
                 "steps": 100_000,
-                "t_inv_sample": 1/13,
-                "t_inv_train_deploy": 1/13,
-                "kl_divergence_coefficient": "auto",
+                "t_inv_sample": "auto",
+                "t_inv_train_deploy": 1.5/13,
+                "kl_divergence_coefficient": 1,
                 "misspecified_reward_value": misspecified_reward_value
             },
-            variable_kwargs={
-                "q_cap": misspecified_reward_thresholds,
-                "kl_divergence_target": kl_divergence_targets
-            },
-            variable_kwarg_gather_type = "zip"
+            variable_kwargs={}
         )
 
 def generate_quantile_data(path: str, misspecified_reward_value: float, timesteps: int, runs: int):
