@@ -10,6 +10,7 @@ import logging
 from typing import Literal
 from collections import deque
 from utils import TomatoGrid, Action
+import utils.functions as UF
 
 logger = logging.getLogger(__name__)
 
@@ -165,8 +166,8 @@ class QAgent(nn.Module):
                 estimated_future_kl_1 = torch.einsum("ba,ba->b", next_probabilities_1, next_outputs_1["kl"])
                 estimated_future_kl_2 = torch.einsum("ba,ba->b", next_probabilities_2, next_outputs_2["kl"])
 
-                kl_1 = self.safe_kl_div(base_probabilities=base_probabilities, altered_probabilities=next_probabilities_1)
-                kl_2 = self.safe_kl_div(base_probabilities=base_probabilities, altered_probabilities=next_probabilities_2)
+                kl_1 = UF.safe_kl_div(base_probabilities=base_probabilities, altered_probabilities=next_probabilities_1)
+                kl_2 = UF.safe_kl_div(base_probabilities=base_probabilities, altered_probabilities=next_probabilities_2)
 
                 kl_1_centered = kl_1 - self.average_kl_divergence
                 kl_2_centered = kl_2 - self.average_kl_divergence
@@ -211,7 +212,7 @@ class QAgent(nn.Module):
 
         probabilities = self.get_probabilities(outputs, mode="deploy", action_validity=data["action_validity"]).detach()
 
-        kl_divergence = self.safe_kl_div(
+        kl_divergence = UF.safe_kl_div(
             base_probabilities=F.softmax(invalid_actions_mask, dim=-1).detach(),
             altered_probabilities=probabilities)
 
@@ -320,16 +321,16 @@ class QAgent(nn.Module):
         else:
             if self.q_cap is None:
                 # If no q_cap, use softmax
-                probabilities = self.safe_exp_logits(adjusted_q_outputs * t_inv + action_validity_mask)
+                probabilities = UF.safe_exp_logits(adjusted_q_outputs * t_inv + action_validity_mask)
             else:
                 # If q_cap is provided, use capped softmax
-                log_probabilities = -self.safe_log_one_plus_exp(t_inv * (self.q_cap - adjusted_q_outputs)) + action_validity_mask
-                probabilities = self.safe_exp_logits(log_probabilities)
+                log_probabilities = -UF.safe_log_one_plus_exp(t_inv * (self.q_cap - adjusted_q_outputs)) + action_validity_mask
+                probabilities = UF.safe_exp_logits(log_probabilities)
 
         if self.model_kl:
             # Use the expected future KL divergence to scale the probabilities
             # Less KL divergence = more likely to take the action
-            relative_probabilties = self.safe_exp_logits(-outputs["kl"])
+            relative_probabilties = UF.safe_exp_logits(-outputs["kl"])
             probabilities = probabilities * relative_probabilties
 
         return self.normalize_probabilities(probabilities)
@@ -355,35 +356,7 @@ class QAgent(nn.Module):
 
         return 1/max(t_inv, 1e-2)
 
-    
-    @staticmethod
-    def safe_log_one_plus_exp(x: torch.Tensor, threshold: float = 5):
-        output = torch.zeros_like(x)
-        output[x < threshold] = torch.log(1 + torch.exp(x[x < threshold]))
-        output[x >= threshold] = x[x >= threshold]
-        return output
-    
-    @staticmethod
-    def safe_kl_div(base_probabilities: torch.Tensor, altered_probabilities: torch.Tensor):
-
-        output = torch.zeros_like(base_probabilities)
-        suitable_indices = (base_probabilities > 1e-3) & (altered_probabilities > 1e-3)
-        output[suitable_indices] = altered_probabilities[suitable_indices] * torch.log(altered_probabilities[suitable_indices] / base_probabilities[suitable_indices])
-
-        return output.sum(dim=-1)
-    
-    @staticmethod
-    def safe_exp_logits(x: torch.Tensor, threshold: float = 5):
-
-        x = x - torch.max(x, dim=-1, keepdim=True).values.detach()
-
-        return x.exp()
-    
-    @staticmethod
-    def normalize_probabilities(probabilities: torch.Tensor):
-        return probabilities / probabilities.sum(dim=-1, keepdim=True)
-
-
+   
 class StateBuffer:
     def __init__(self, buffer_size: int, batch_size: int):
         self.buffer_size = buffer_size

@@ -73,10 +73,10 @@ def main():
     )
 
     # Do quantilization!!
-    quantiles = [0.001] #[0.5, 0.1, 0.02, 0.005, 0.001]
+    quantiles = [0.5, 0.1, 0.02, 0.005, 0.001]
     # kl_divergence_targets = [np.log(1/quantile)/np.sqrt(100) for quantile in quantiles]
 
-    for misspecified_reward_value in [13]:
+    for misspecified_reward_value in [13, 20]:
         quantile_data = pd.read_csv(f"Q Learning/Data/quantile_data_misspecified_reward_{misspecified_reward_value}.csv")
         quantile_data = quantile_data.sort_values(by="misspecified_reward", ascending=True).reset_index(drop=True)
 
@@ -93,7 +93,9 @@ def main():
                 "kl_divergence_coefficient": 1,
                 "misspecified_reward_value": misspecified_reward_value
             },
-            variable_kwargs={}
+            variable_kwargs={
+                "q_cap": misspecified_reward_thresholds
+            }
         )
 
 def generate_quantile_data(path: str, misspecified_reward_value: float, timesteps: int, runs: int):
