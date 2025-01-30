@@ -248,7 +248,7 @@ class QMatrix():
             t_inv: float = 1.5/13,
             misspecified_reward_value: int = 13,
             gamma: float = 0.99,
-            update_size: float = 0.1,
+            update_size: float = 0.5,
             kl_divergence_penalty: float|None = None,
             q_cap: float|None = None
             ):

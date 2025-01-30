@@ -24,7 +24,7 @@ if __name__ == "__main__":
     }]
 
     t_invs = [0.1/13, 0.2/13, 0.5/13, 1/13, 1.5/13, 2/13, 3/13]
-    gammas = [1-1/10, 1-1/30, 1-1/100]
+    gammas = [1-1/100]
 
     for t_inv, gamma in product(t_invs, gammas):
         # Boltzmann sampling
@@ -41,7 +41,7 @@ if __name__ == "__main__":
             "misspecified_reward_value": 13,
             "kl_divergence_penalty": 1,
             "gamma": gamma,
-            "t_inv": 0,
+            "t_inv": t_inv,
             "q_cap": None,
             "category": "soft_q_learning",
         })
@@ -50,12 +50,12 @@ if __name__ == "__main__":
             "misspecified_reward_value": 20,
             "kl_divergence_penalty": 1,
             "gamma": gamma,
-            "t_inv": 0,
+            "t_inv": t_inv,
             "q_cap": None,
             "category": "soft_q_learning_high_reward",
         })
 
-    q_caps = [7, 7.5, 8, 8.5, 9, 9.5, 10, 10.5, 11, 11.5, 12, 12.5, 13]
+    q_caps = [6, 6.7, 7, 7.5, 8, 8.5, 9, 9.5, 10]
 
     for q_cap, gamma in product(q_caps, gammas):
         # Use just Q-cap
@@ -98,6 +98,6 @@ if __name__ == "__main__":
             dict_list.append({**kwargs, "reward": None, "utility": None, "error": str(e)})
             status_list.append("error")
 
-    pd.DataFrame(dict_list).to_csv("Q Matrix Solving/results.csv")
+    pd.DataFrame(dict_list).to_csv("Q Matrix Solving/Data/results.csv")
 
     print(status_list)
