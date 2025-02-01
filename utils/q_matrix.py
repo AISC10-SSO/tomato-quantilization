@@ -284,7 +284,7 @@ class QMatrix():
         if self.q_cap is None:
             logits = self.q_matrices["reward"] * self.t_inv + self.valid_action_mask
         else:
-            logits = -UF.safe_log_one_plus_exp((self.q_cap - self.q_matrices["reward"]) * self.t_inv) + self.valid_action_mask
+            logits = -F.softplus((self.q_cap - self.q_matrices["reward"]) * self.t_inv) + self.valid_action_mask
 
         if self.kl_divergence_penalty is not None:
             logits = logits - self.q_matrices["kl_divergence"] * self.kl_divergence_penalty

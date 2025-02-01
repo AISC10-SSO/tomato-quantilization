@@ -1,10 +1,4 @@
 import torch
-
-def safe_log_one_plus_exp(x: torch.Tensor, threshold: float = 4) -> torch.Tensor:
-    output = torch.zeros_like(x)
-    output[x < threshold] = torch.log(1 + torch.exp(x[x < threshold]))
-    output[x >= threshold] = x[x >= threshold]
-    return output
     
 def safe_kl_div(base_probabilities: torch.Tensor, altered_probabilities: torch.Tensor) -> torch.Tensor:
 
