@@ -17,22 +17,11 @@ We find that quantilization **only** works well when we replace invalid moves wi
 When the invalid move is replaced by WAIT, we find that the quantilization is ineffective.
 If we use the KMV simplification method, we find that the quantilization is catastrophic.
 
-# Next steps: Suspiciousness Score
+# Q-Matrix Solving
 
-Quantilization involves selecting actions from a prior distribution, given the reward is greater than the quantilizer threshold.
-Scalable oversight involves selecting actions from an untrusted policy, given that the suspiciousness score is below a threshold.
-In practice, both of these are similar problems, and this will be especially true when we work with LLMs:
-both will involve mixing a trusted-but-weak policy with an untrusted-but-strong policy, in order to attempt to generate a trusted-and-strong policy.
+We have code which uses dynamic programming to solve for a Q-matrix of all possible states and actions.
+There are 2^13 * 29 * 5 = 1187840 entries in this matrix.
+We are able to solve this through backward iteration on the Bellman equation.
 
-We will add as suspiciousness score: the number of steps spent on a tomato tile.
-It is "suspicious" if the policy spends very little time on a tomato tile.
-
-We can try quantilizing by both the suspiciousness score and the reward.
-We also try quantilizing by some mixture of the (normalized) suspiciousness score and the (normalized) reward.
-Both work but are not very clean or nice.
-
-# Q-learning
-
-We add a Q-learning agent, code for which can be found in utils/learning.py.
-The Q-learning agent is able to reward hack the environment, which gets high reward but low utility.
-We have added a large number of options such as reward capping, temperature, KL divergence regularization, q capping, and more.
+We find that our attempts at capped soft Q-learning achieve better success than soft Q-learning,
+though they compare poorly to a baseline of ideal performance.
