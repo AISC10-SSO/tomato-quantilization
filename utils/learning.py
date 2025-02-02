@@ -34,9 +34,7 @@ class QNetwork(nn.Module):
         if self.model_kl:
             self.fc_kl = nn.Linear(512, action_size)
 
-        self.reward_so_far_projection = nn.Linear(1, 64, bias=False)
-
-    def forward(self, x: torch.Tensor, reward_so_far: torch.Tensor|None = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass of the Q Network
 
@@ -49,9 +47,6 @@ class QNetwork(nn.Module):
         x = F.relu(self.bn1(self.conv1(x)))
         x = F.relu(self.bn2(self.conv2(x)))
         x = x.mean(dim=(-2,-1))
-
-        if reward_so_far is not None:
-            x = x + self.reward_so_far_projection(reward_so_far)
 
         x = F.relu(self.fc1(x))
 
@@ -87,25 +82,25 @@ class QAgent(nn.Module):
 
         if self.double_network:
             self.network_target_map = {
-                1: 2,
-                2: 1
+                "1": "2",
+                "2": "1"
             }
         else:
             self.network_target_map = {
-                1: 1
+                "1": "1"
             }
 
-        self.networks = {
-            i: QNetwork(input_channels, action_size, model_kl=self.model_kl)
+        self.networks = nn.ModuleDict({
+            str(i): QNetwork(input_channels, action_size, model_kl=self.model_kl)
             for i in self.network_target_map.keys()
-        }
-        self.target_networks = {
-            i: QNetwork(input_channels, action_size, model_kl=self.model_kl)
+        })
+        self.target_networks = nn.ModuleDict({
+            str(i): QNetwork(input_channels, action_size, model_kl=self.model_kl)
             for i in self.networks.keys()
-        }
+        })
 
         for i in self.networks.keys():
-            self.target_networks[i].load_state_dict(self.networks[i].state_dict())
+            self.target_networks[str(i)].load_state_dict(self.networks[str(i)].state_dict())
 
         self.gamma = gamma
 
@@ -146,26 +141,25 @@ class QAgent(nn.Module):
         invalid_actions_mask = (~data["action_validity"]).float() * -1e9
         next_state_invalid_actions_mask = (~data["next_state_action_validity"]).float() * -1e9
 
-        outputs_1 = self.network_1(data["state"])
-        outputs_2 = self.network_2(data["state"])
-
         with torch.no_grad():
             # Get Q-values from both target network
             next_outputs = {
-                k: self.target_networks[self.network_target_map[k]](data["next_state"])
-                for k in self.networks.keys()
+                k: target_network(data["next_state"])
+                for k, target_network in self.target_networks.items()
             }
             next_probabilities = {
-                k: self.get_probabilities(next_outputs[k], mode="deploy", action_validity=data["next_state_action_validity"])
-                for k in self.networks.keys()
+                k: self.get_probabilities(next_output, mode="deploy", action_validity=data["next_state_action_validity"])
+                for k, next_output in next_outputs.items()
             }
             next_predictions = {
                 network_k: {
-                    output_name: torch.einsum("ba,ba->b", next_probabilities[network_k], next_outputs[network_k][output_name])
-                    for output_name in next_outputs[network_k].keys()
+                    output_k: torch.einsum("ba,ba->b", next_probability, next_output)
+                    for output_k, next_output in next_outputs[network_k].items()
                 }
-                for network_k in self.networks.keys()
+                for network_k, next_probability in next_probabilities.items()
             }
+
+            reward = data["reward"].float()
 
             if self.reward_cap is not None:
                 reward = reward.clamp(max=self.reward_cap)
@@ -174,8 +168,8 @@ class QAgent(nn.Module):
 
             targets = {
                 "q_reward": {
-                    k: reward_centered + self.gamma * next_predictions[k]["q_reward"]
-                    for k in self.networks.keys()
+                    k: reward_centered + self.gamma * next_prediction["q_reward"]
+                    for k, next_prediction in next_predictions.items()
                 }
             }
 
@@ -196,7 +190,7 @@ class QAgent(nn.Module):
                 }
 
                 targets["q_kl"] = {
-                    k: kl_divergences_centered[k] + self.gamma * kl_divergences_centered[self.network_target_map[k]]
+                    k: kl_divergences_centered[k] + self.gamma * next_predictions[k]["q_kl"]
                     for k in self.networks.keys()
                 }
 
@@ -212,7 +206,11 @@ class QAgent(nn.Module):
 
         for network_idx, target_network_idx in self.network_target_map.items():
             for name, output in outputs[network_idx].items():
-                loss += F.smooth_l1_loss(output, targets[name][target_network_idx])
+                try:
+                    loss += F.smooth_l1_loss(output.gather(1, index=data["action"].long().unsqueeze(1)), targets[name][target_network_idx])
+                except Exception as e:
+                    print(f"{output.shape=}, {data['action'].shape=}")
+                    raise e
 
         # Use average of both networks for probabilities and outputs
         probabilities = {
@@ -248,22 +246,19 @@ class QAgent(nn.Module):
         Returns:
             int: Action to take
         """
-        output_1 = self.network_1(state)
-        output_2 = self.network_2(state)
-
-        outputs = {
-            k: (output_1[k] + output_2[k]) / 2
-            for k in output_1.keys()
+        probabilities = {
+            k: self.get_probabilities(network(state), mode=mode, action_validity=action_validity)
+            for k, network in self.networks.items()
         }
 
-        probabilities = self.get_probabilities(outputs, mode=mode, action_validity=action_validity)
+        mean_probabilities = torch.mean(torch.stack(list(probabilities.values()), dim=0), dim=0)
         # Choose randomly
 
         try:
-            output =  torch.multinomial(probabilities, 1)
+            output =  torch.multinomial(mean_probabilities, 1)
         except Exception as e:
             logger.warning(f"Error getting action: {e}")
-            output = torch.argmax(probabilities, dim=-1)
+            output = torch.argmax(mean_probabilities, dim=-1)
 
         if output.shape[0] == 1:
             return output.item()

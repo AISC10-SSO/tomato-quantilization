@@ -35,7 +35,7 @@ def run_experiment(*, reward_value: int|None = 13) -> list[str]|None:
     kwargs_list = [{
             "misspecified_reward_value": reward_value,
         "kl_divergence_penalty": None,
-        "gamma": 0.9,
+        "gamma": 0.99,
         "t_inv": 0,
         "q_cap": None,
         "category": "totally_random",
@@ -56,7 +56,7 @@ def run_experiment(*, reward_value: int|None = 13) -> list[str]|None:
             "gamma": 0.99,
             "t_inv": t_inv,
             "q_cap": None,
-            "category": "boltzmann_sampling" if reward_value is kl_divergence_penalty is None else "soft_q_learning",
+            "category": "boltzmann_sampling" if kl_divergence_penalty is None else "soft_q_learning",
         })
 
     q_caps = [6, 6.7, 7, 7.5, 8, 8.5, 9, 9.5, 10]

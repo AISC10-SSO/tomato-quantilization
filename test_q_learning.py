@@ -12,109 +12,20 @@ from tqdm import tqdm
 def main():
     torch.set_default_device(device)
 
-    # Basic boltzmann sampling
     run_test(
-        repeats=3, 
-        save_path="Q Learning/Data/only_boltzmann_sampling.csv",
-        fixed_kwargs={
-            "gamma": 0.99,
-            "steps": 100_000,
-            "t_inv_sample": 1/13
-        },
-        variable_kwargs={
-            "t_inv_train_deploy": [0.1/13, 0.2/13, 0.5/13, 1/13, 1.5/13, 2/13, 3/13, 5/13],
-        }
-    )
-
-
-    # Boltzmann sampling + kl divergence penalty
-    run_test(
-        repeats=3, 
-        save_path="Q Learning/Data/soft_q_learning.csv",
+        repeats=1,
+        save_path="Q Learning/Data/q_learning_no_reward_cap.csv",
         fixed_kwargs={
             "gamma": 0.99,
             "steps": 100_000,
             "t_inv_sample": 1/13,
-            "kl_divergence_coefficient": "auto"
+            "t_inv_train_deploy": 1.5/13,
+            "kl_divergence_coefficient": 1
         },
         variable_kwargs={
-            "t_inv_train_deploy": [0.1/13, 0.2/13, 0.5/13, 1/13, 1.5/13, 2/13, 3/13, 5/13],
+            "q_cap": [None]
         }
     )
-
-    # Soft q-learning works less well when the reward hack is higher
-    run_test(
-        repeats=3, 
-        save_path="Q Learning/Data/soft_q_learning_misspecified_reward_20.csv",
-        fixed_kwargs={
-            "gamma": 0.99,
-            "steps": 100_000,
-            "t_inv_sample": 1/13,
-            "kl_divergence_coefficient": "auto",
-            "misspecified_reward_value": 20
-        },
-        variable_kwargs={
-            "t_inv_train_deploy": [0.1/13, 0.2/13, 0.5/13, 1/13, 1.5/13, 2/13, 3/13, 5/13],
-        }
-    )
-
-    # Generate quantile data so that we can use it for the quantilization method
-    generate_quantile_data(
-        path="Q Learning/Data/quantile_data_misspecified_reward_13.csv",
-        misspecified_reward_value=13,
-        timesteps=100,
-        runs=10_000
-    )
-    generate_quantile_data(
-        path="Q Learning/Data/quantile_data_misspecified_reward_20.csv",
-        misspecified_reward_value=20,
-        timesteps=100,
-        runs=10_000
-    )
-
-    # Do quantilization!!
-    quantiles = [0.5, 0.1, 0.02, 0.005, 0.001]
-    # kl_divergence_targets = [np.log(1/quantile)/np.sqrt(100) for quantile in quantiles]
-
-    for misspecified_reward_value in [13, 20]:
-        quantile_data = pd.read_csv(f"Q Learning/Data/quantile_data_misspecified_reward_{misspecified_reward_value}.csv")
-        quantile_data = quantile_data.sort_values(by="misspecified_reward", ascending=True).reset_index(drop=True)
-
-        misspecified_reward_thresholds = [quantile_data["misspecified_reward"][int(len(quantile_data) * (1-quantile))] for quantile in quantiles]
-
-        run_test(
-            repeats=1, 
-            save_path=f"Q Learning/Data/soft_q_learning_q_cap_misspecified_reward_{misspecified_reward_value}.csv",
-            fixed_kwargs={
-                "gamma": 0.99,
-                "steps": 100_000,
-                "t_inv_sample": "auto",
-                "t_inv_train_deploy": 1.5/13,
-                "kl_divergence_coefficient": 1,
-                "misspecified_reward_value": misspecified_reward_value
-            },
-            variable_kwargs={
-                "q_cap": misspecified_reward_thresholds
-            }
-        )
-
-def generate_quantile_data(path: str, misspecified_reward_value: float, timesteps: int, runs: int):
-    if os.path.exists(path):
-        print(f"File {path} already exists. Skipping...")
-        return
-    
-    print(f"Generating quantile data for misspecified reward value {misspecified_reward_value}...")
-
-    dfs = []
-
-    for _ in tqdm(range(runs)):
-        true_utility, misspecified_reward, __ = sample_random_policy(steps=timesteps, misspecified_reward_value=misspecified_reward_value)
-        dfs.append(pd.DataFrame({"true_utility": [true_utility], "misspecified_reward": [misspecified_reward]}))
-
-    final_df = pd.concat(dfs)
-    final_df.to_csv(path)
-
-    return
 
 
 def run_test(
