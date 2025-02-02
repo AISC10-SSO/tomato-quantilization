@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
+import gymnasium as gym
 
 import random
 import logging
@@ -14,25 +15,62 @@ import utils.functions as UF
 
 logger = logging.getLogger(__name__)
 
+class TomatoGridGym(gym.Env):
+    def __init__(self):
+        super().__init__()
+
+        self.gridworld = TomatoGrid()
+
+        self.action_space = gym.spaces.Discrete(5)
+        self.observation_space = gym.spaces.Box(
+            low=0,
+            high=255,
+            shape=(7, 9, 6),
+            dtype=np.uint8
+        )
+
+    def reset(self):
+        self.gridworld.reset()
+
+    def step(self, action: int):
+        self.gridworld.update_grid(list(Action)[action])
+
+        observation = self.gridworld.get_state_tensor(format="numpy")
+        output = self.gridworld.get_current_utility()
+        reward = output["misspecified_reward"]
+        terminated = False
+        truncated = False
+        info = {"true_utility": output["true_utility"]}
+
+        # observation, reward, terminated, truncated, info
+        return observation, reward, terminated, truncated, info
+    
+gym.register(id="tomato-grid", entry_point="utils.learning:TomatoGridGym")
+
 class QNetwork(nn.Module):
 
-    def __init__(self, input_channels: int, action_size: int, model_kl: bool = False):
+    def __init__(
+            self, *,
+            input_channels: int,
+            action_size: int,
+            model_kl: bool = False,
+            network_widths: tuple[int, int, int] = (16, 32, 64)):
         """
         Convolutional Q Network for the tomato gridworld
         """
         super().__init__()
 
-        self.conv1 = nn.Conv2d(input_channels, 32, kernel_size=3, stride=1)
-        self.bn1 = nn.BatchNorm2d(32)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, stride=1)
-        self.bn2 = nn.BatchNorm2d(64)
-        self.fc1 = nn.Linear(64, 512)
-        self.fc_q = nn.Linear(512, action_size)
+        self.conv1 = nn.Conv2d(input_channels, network_widths[0], kernel_size=3, stride=1)
+        self.bn1 = nn.BatchNorm2d(network_widths[0])
+        self.conv2 = nn.Conv2d(network_widths[0], network_widths[1], kernel_size=3, stride=1)
+        self.bn2 = nn.BatchNorm2d(network_widths[1])
+        self.fc1 = nn.Linear(network_widths[1], network_widths[2])
+        self.fc_q = nn.Linear(network_widths[2], action_size)
 
         self.model_kl = model_kl
 
         if self.model_kl:
-            self.fc_kl = nn.Linear(512, action_size)
+            self.fc_kl = nn.Linear(network_widths[2], action_size)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -70,7 +108,8 @@ class QAgent(nn.Module):
             reward_cap: float|None = None,
             q_cap: float|None = None,
             variable_t_inv: bool = False,
-            double_network: bool = True):
+            double_network: bool = False,
+            network_widths: tuple[int, int, int] = (16, 32, 64)):
     
         super().__init__()
 
@@ -90,12 +129,14 @@ class QAgent(nn.Module):
                 "1": "1"
             }
 
+        network_kwargs = {"input_channels": input_channels, "action_size": action_size, "model_kl": self.model_kl, "network_widths": network_widths}
+
         self.networks = nn.ModuleDict({
-            str(i): QNetwork(input_channels, action_size, model_kl=self.model_kl)
+            str(i): QNetwork(**network_kwargs)
             for i in self.network_target_map.keys()
         })
         self.target_networks = nn.ModuleDict({
-            str(i): QNetwork(input_channels, action_size, model_kl=self.model_kl)
+            str(i): QNetwork(**network_kwargs)
             for i in self.networks.keys()
         })
 
@@ -202,12 +243,17 @@ class QAgent(nn.Module):
             for k in self.networks.keys()
         }
 
-        loss = torch.tensor(0)
+        loss = torch.tensor(0.0)
+
+        actions = data["action"].unsqueeze(1)
 
         for network_idx, target_network_idx in self.network_target_map.items():
             for name, output in outputs[network_idx].items():
                 try:
-                    loss += F.smooth_l1_loss(output.gather(1, index=data["action"].long().unsqueeze(1)), targets[name][target_network_idx])
+                    output_gathered = output.gather(1, index=actions).squeeze(1)
+                    loss += F.smooth_l1_loss(
+                        output_gathered,
+                        targets[name][target_network_idx])
                 except Exception as e:
                     print(f"{output.shape=}, {data['action'].shape=}")
                     raise e
@@ -265,7 +311,7 @@ class QAgent(nn.Module):
         else:
             return output.flatten().tolist()
     
-    def update_target_network(self, tau: float = 0.5):
+    def update_target_networks(self, tau: float = 0.5) -> None:
         """
         Update the target network with exponential moving average, using the current network's parameters
 
@@ -273,15 +319,13 @@ class QAgent(nn.Module):
             tau (float): Tau value for the exponential moving average
         """
 
-        new_state_dict = self.network_1.state_dict()
-        for name, param in new_state_dict.items():
-            self.target_network_1.state_dict()[name].copy_(
-                self.target_network_1.state_dict()[name] * (1-tau) + param * tau)
-        
-        new_state_dict = self.network_2.state_dict()
-        for name, param in new_state_dict.items():
-            self.target_network_2.state_dict()[name].copy_(
-                self.target_network_2.state_dict()[name] * (1-tau) + param * tau)
+        for network_idx, target_network_idx in self.network_target_map.items():
+            new_state_dict = self.networks[network_idx].state_dict()
+            for name, param in new_state_dict.items():
+                self.target_networks[target_network_idx].state_dict()[name].copy_(
+                    self.target_networks[target_network_idx].state_dict()[name] * (1-tau) + param * tau)
+                
+        return
         
     def get_probabilities(self, outputs: dict[str, torch.Tensor], mode: Literal["sample", "deploy"], action_validity: torch.Tensor|None = None):
         """
@@ -458,7 +502,7 @@ class QLearning:
 
                     self.optimizer.step()
                 
-                    self.q_agent.update_target_network(tau=0.01)
+                    self.q_agent.update_target_networks(tau=0.01)
 
             if step_idx % 1000 == 0:
                 test_output = self.test_model()

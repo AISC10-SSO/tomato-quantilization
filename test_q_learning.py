@@ -1,31 +1,17 @@
 from utils import device, sample_random_policy
 from utils.learning import QLearning
 import numpy as np
-import matplotlib.pyplot as plt
 import torch
 import pandas as pd
 from itertools import chain, product
 from typing import Literal
 import os
 from tqdm import tqdm
-
+import gymnasium as gym
 def main():
     torch.set_default_device(device)
 
-    run_test(
-        repeats=1,
-        save_path="Q Learning/Data/q_learning_no_reward_cap.csv",
-        fixed_kwargs={
-            "gamma": 0.99,
-            "steps": 100_000,
-            "t_inv_sample": 1/13,
-            "t_inv_train_deploy": 1.5/13,
-            "kl_divergence_coefficient": 1
-        },
-        variable_kwargs={
-            "q_cap": [None]
-        }
-    )
+    env = gym.make("tomato-grid")
 
 
 def run_test(
