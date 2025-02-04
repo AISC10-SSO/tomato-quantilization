@@ -8,6 +8,7 @@ from typing import Literal
 import os
 from tqdm import tqdm
 import gymnasium as gym
+
 def main():
     torch.set_default_device(device)
 

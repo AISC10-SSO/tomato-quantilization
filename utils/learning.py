@@ -32,6 +32,8 @@ class TomatoGridGym(gym.Env):
     def reset(self):
         self.gridworld.reset()
 
+        return self.gridworld.get_state_tensor(format="numpy"), {}
+
     def step(self, action: int):
         self.gridworld.update_grid(list(Action)[action])
 
@@ -44,6 +46,13 @@ class TomatoGridGym(gym.Env):
 
         # observation, reward, terminated, truncated, info
         return observation, reward, terminated, truncated, info
+    
+    def render(self):
+        state: list[list[str]] = self.gridworld.grid_state
+        state[self.gridworld.agent_position[0]][self.gridworld.agent_position[1]] = "A"
+
+        for row in state:
+            print("".join(row))
     
 gym.register(id="tomato-grid", entry_point="utils.learning:TomatoGridGym")
 
