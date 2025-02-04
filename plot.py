@@ -7,12 +7,45 @@ from collections import defaultdict
 
 def main():
 
-    plot_demo_plots()
+    # plot_demo_plots()
 
     for misspecified_reward_value in [13, 20]:
-        plot_q_matrix_data(misspecified_reward_value)
+        # plot_q_matrix_data(misspecified_reward_value)
+        pass
 
-    plot_q_matrix_comparison(misspecified_reward_values=[13, 20])
+    # plot_q_matrix_comparison(misspecified_reward_values=[13, 20])
+
+    for misspecified_reward_value in [13, 20]:
+        plot_thresholded_trajectories(misspecified_reward_value)
+
+def plot_thresholded_trajectories(misspecified_reward_value: int = 13) -> None:
+
+    q_matrix_df = pd.read_csv(f"Q Matrix Solving/Data/results_reward_{misspecified_reward_value}.csv")
+    q_matrix_df["misspecified_reward"] = q_matrix_df["reward"] / 100
+    q_matrix_df["true_utility"] = q_matrix_df["utility"] / 100
+    q_matrix_df["threshold"] = q_matrix_df["q_cap"]
+    q_matrix_df = q_matrix_df[q_matrix_df["category"] == f"q_cap_soft_t_inv_{10/13}"][["misspecified_reward", "true_utility", "threshold"]]
+    q_matrix_df["Name"] = "Q-Matrix Solver"
+
+    df_list = []
+    for threshold in [0., 6.0, 6.5, 7.0, 7.5, 8.0, 8.5]:
+        df = pd.read_csv(f"Random Policy Testing/Data/datapoints_{misspecified_reward_value}_{threshold}.csv")
+        df["threshold"] = threshold
+        df_list.append(df.mean(axis=0))
+
+    monte_carlo_df = pd.DataFrame(df_list)
+    monte_carlo_df["Name"] = "Monte Carlo"
+
+    final_df = pd.concat([monte_carlo_df, q_matrix_df])
+
+
+    # Plot reward against utility
+    sns.lineplot(data=final_df, x="threshold", y="true_utility", style="Name")
+    sns.lineplot(data=final_df, x="threshold", y="misspecified_reward", style="Name")
+
+    plt.savefig(f"Random Policy Testing/Plots/thresholded_trajectories_{misspecified_reward_value}.png", bbox_inches="tight", dpi=600)
+    plt.clf()
+
 
 def plot_demo_plots() -> None:
     q = np.linspace(0, 20, 100)
