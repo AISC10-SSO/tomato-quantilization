@@ -29,9 +29,13 @@ def plot_thresholded_trajectories(misspecified_reward_value: int = 13) -> None:
 
     df_list = []
     for threshold in [0., 6.0, 6.5, 7.0, 7.5, 8.0, 8.5]:
-        df = pd.read_csv(f"Random Policy Testing/Data/datapoints_{misspecified_reward_value}_{threshold}.csv")
-        df["threshold"] = threshold
-        df_list.append(df.mean(axis=0))
+        try:
+            df = pd.read_csv(f"Random Policy Testing/Data/datapoints_{misspecified_reward_value}_{threshold}.csv")
+            df["threshold"] = threshold
+            df_list.append(df.mean(axis=0))
+        except FileNotFoundError:
+            print(f"No data found for threshold {threshold}")
+            continue
 
     monte_carlo_df = pd.DataFrame(df_list)
     monte_carlo_df["Name"] = "Monte Carlo"

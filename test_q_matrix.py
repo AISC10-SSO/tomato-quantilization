@@ -6,6 +6,19 @@ import os
 
 def main():
 
+    q_matrix = QMatrix(
+        misspecified_reward_value=13,
+        kl_divergence_penalty=None,
+        gamma=0.99,
+        t_inv=0,
+        q_cap=None,
+    )
+
+    print(q_matrix.get_reward_and_utility())
+
+
+    exit()
+
     for reward_value in [None, 13, 20]:
         status_list = run_experiment(reward_value=reward_value)
         if status_list is None:
@@ -33,7 +46,7 @@ def run_experiment(*, reward_value: int|None = 13) -> list[str]|None:
         print(f"Running experiment for {reward_value}")
 
     kwargs_list = [{
-            "misspecified_reward_value": reward_value,
+        "misspecified_reward_value": reward_value,
         "kl_divergence_penalty": None,
         "gamma": 0.99,
         "t_inv": 0,

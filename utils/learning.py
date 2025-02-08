@@ -16,10 +16,10 @@ import utils.functions as UF
 logger = logging.getLogger(__name__)
 
 class TomatoGridGym(gym.Env):
-    def __init__(self):
+    def __init__(self, gridworld_config: dict):
         super().__init__()
 
-        self.gridworld = TomatoGrid()
+        self.gridworld = TomatoGrid(**gridworld_config)
 
         self.action_space = gym.spaces.Discrete(5)
         self.observation_space = gym.spaces.Box(
@@ -172,7 +172,7 @@ class QAgent(nn.Module):
 
         self.print_info = False
 
-    def get_loss(self, data: dict[str, torch.Tensor]):
+    def get_loss(self, data: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         """
         Get the loss from a batch of data, containing rewards per state, actions taken, and input states
 
@@ -461,7 +461,7 @@ class QLearning:
 
         self.outputs = []
 
-    def get_action_validity(self, gridworld: TomatoGrid):
+    def _get_action_validity(self, gridworld: TomatoGrid):
         valid_actions = gridworld.get_valid_actions()
         action_validity = torch.tensor([action in valid_actions for action in list(Action)])
         return action_validity
@@ -478,7 +478,7 @@ class QLearning:
             state = gridworld.get_state_tensor()
             dict_["state"] = state
 
-            dict_["action_validity"] = self.get_action_validity(gridworld).unsqueeze(0)
+            dict_["action_validity"] = self._get_action_validity(gridworld).unsqueeze(0)
 
             action_idx = self.q_agent.get_action(state = state.unsqueeze(0), action_validity=dict_["action_validity"], mode="sample")
             dict_["action"] = torch.tensor(action_idx)
@@ -487,7 +487,7 @@ class QLearning:
             output = gridworld.update_grid(action)
 
             dict_["next_state"] = gridworld.get_state_tensor()
-            dict_["next_state_action_validity"] = self.get_action_validity(gridworld).unsqueeze(0)
+            dict_["next_state_action_validity"] = self._get_action_validity(gridworld).unsqueeze(0)
 
             dict_["reward"] = torch.tensor(output.misspecified_reward)
             self.state_buffer.add(dict_)
@@ -522,14 +522,14 @@ class QLearning:
                 print(f"Average kl divergence: {self.q_agent.average_kl_divergence}")
                 """
 
-    def test_model(self):
+    def test_model(self) -> dict[str, float]:
         gridworlds = [TomatoGrid(**self.gridworld_config) for _ in range(10)]
 
         outputs = []
 
         for _ in range(100):
             state = torch.stack([gridworld.get_state_tensor() for gridworld in gridworlds])
-            action_validity = torch.stack([self.get_action_validity(gridworld) for gridworld in gridworlds])
+            action_validity = torch.stack([self._get_action_validity(gridworld) for gridworld in gridworlds])
             action_indices = self.q_agent.get_action(state = state, action_validity=action_validity, mode="deploy")
             actions = [list(Action)[action_idx] for action_idx in action_indices]
             outputs += [gridworld.update_grid(action) for gridworld, action in zip(gridworlds, actions)]

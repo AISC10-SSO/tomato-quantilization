@@ -8,17 +8,16 @@ from tqdm import tqdm
 Contains utilities for running Q-learning with a big matrix rather than a neural network
 """
 
-STATE_DIMENSIONS = (2,)*13 + (29,)
-
-INITIAL_STATE_CODE = [0,0,0,1,1,0,0,0,1,0,1,0,1,10]
+state_dimensions = lambda: (2,)*13 + (29,)
+initial_state_code = lambda: [0,0,0,1,1,0,0,0,1,0,1,0,1,10]
 
 """
 X X X X X X X X X   XX XX XX XX XX XX XX XX XX
 X X X X X X X O X   XX XX XX XX XX XX XX 00 XX
-X T T T T T T _ X   XX 01 02 03 04 05 06 07 XX
+X T T T t t T _ X   XX 01 02 03 04 05 06 07 XX
 X _ _ _ _ _ _ _ X   XX 08 09 10 11 12 13 14 XX
 X _ _ _ _ _ _ _ X   XX 15 16 17 18 19 20 21 XX
-X T T T T T T T X   XX 22 23 24 25 26 27 28 XX
+X T T t T t T t X   XX 22 23 24 25 26 27 28 XX
 X X X X X X X X X   XX XX XX XX XX XX XX XX XX
 
 
@@ -42,6 +41,7 @@ def create_valid_action_mask() -> torch.Tensor:
     UP DOWN LEFT RIGHT WAIT
     """
     tensor = torch.zeros(29, 5)
+
     #UP
     tensor[0:7, 0] = -1e9
     #DOWN
@@ -51,6 +51,8 @@ def create_valid_action_mask() -> torch.Tensor:
     tensor[0, 2] = -1e9
     #RIGHT
     tensor[0:29:7, 3] = -1e9
+
+    tensor[:,4] = 1e9
 
     return tensor
 
@@ -67,7 +69,7 @@ def roll_dim(tensor: torch.Tensor, function: Callable[[torch.Tensor], torch.Tens
 
 
 def create_reward_tensor(misspecified_reward_value: int|None):
-    tensor = torch.zeros(STATE_DIMENSIONS)
+    tensor = torch.zeros(state_dimensions())
 
     def function(tensor: torch.Tensor) -> torch.Tensor:
         tensor[..., 0, :] += 1
@@ -99,8 +101,9 @@ class TomatoDryingMap():
             state_tensor: a tensor of shape [*tomato_state, destination_position]
         """
 
-        # Apply the dewatering map along each of the 13 dimensions representing binary position
-        tensor = roll_dim(state_tensor, lambda tensor: torch.einsum("...np,on->...op", tensor, self.tensor))
+        # Apply the dewatering map along each of the 13 dimensions representing binary position]
+        # ... = tomato_state, o = output_state, i = input_state, p = position
+        tensor = roll_dim(state_tensor, lambda tensor: torch.einsum("...op,io->...ip", tensor, self.tensor))
         return tensor
     
     def forward(self, state_tensor: torch.Tensor) -> torch.Tensor:
@@ -110,7 +113,7 @@ class TomatoDryingMap():
         Input:
             state_tensor: a tensor of shape [*tomato_state, destination_position]
         """
-        tensor = roll_dim(state_tensor, lambda tensor: torch.einsum("...op,on->...np", tensor, self.tensor))
+        tensor = roll_dim(state_tensor, lambda tensor: torch.einsum("...ip,io->...op", tensor, self.tensor))
         return tensor
 
 class TomatoWateringMap():
@@ -184,22 +187,14 @@ class PositionActionMap():
         for square in range(29):
             if square >= 7:
                 self.tensor[square, 0, square - 7] = 1
-            else:
-                self.tensor[square, 0, square] = 1
 
             if square <= 21:
                 self.tensor[square, 1, square + 7] = 1
-            else:
-                self.tensor[square, 1, square] = 1
 
-            if square % 7 == 1:
-                self.tensor[square, 2, square] = 1
-            else:
+            if (square % 7 != 1) and (square != 0):
                 self.tensor[square, 2, square - 1] = 1
 
-            if square % 7 == 0 or square == 0:
-                self.tensor[square, 3, square] = 1
-            else:
+            if square % 7 != 0:
                 self.tensor[square, 3, square + 1] = 1
 
             self.tensor[square, 4, square] = 1
@@ -258,7 +253,7 @@ class QMatrix():
             "utility": create_reward_tensor(None),
         }
         self.q_matrices = {
-            key: torch.zeros(STATE_DIMENSIONS + (5,))
+            key: torch.zeros(state_dimensions() + (5,))
             for key in self.tensors.keys()
         }
         self.t_inv = t_inv
@@ -270,7 +265,7 @@ class QMatrix():
         self.kl_divergence_penalty = kl_divergence_penalty
 
         if kl_divergence_penalty is not None:
-            self.q_matrices["kl_divergence"] = torch.zeros(STATE_DIMENSIONS + (5,))
+            self.q_matrices["kl_divergence"] = torch.zeros(state_dimensions() + (5,))
 
 
         self.map_collection = MapCollection([
@@ -281,10 +276,12 @@ class QMatrix():
 
     def get_probabilities(self) -> torch.Tensor:
 
+        logits = self.valid_action_mask
+
         if self.q_cap is None:
-            logits = self.q_matrices["reward"] * self.t_inv + self.valid_action_mask
+            logits = logits + self.q_matrices["reward"] * self.t_inv
         else:
-            logits = -F.softplus((self.q_cap - self.q_matrices["reward"]) * self.t_inv) + self.valid_action_mask
+            logits = logits - F.softplus((self.q_cap - self.q_matrices["reward"]) * self.t_inv)
 
         if self.kl_divergence_penalty is not None:
             logits = logits - self.q_matrices["kl_divergence"] * self.kl_divergence_penalty
@@ -304,7 +301,7 @@ class QMatrix():
         }
 
         if self.kl_divergence_penalty is not None:
-            base_probabilities = F.softmax(self.valid_action_mask, dim=-1).expand(*STATE_DIMENSIONS, 5)
+            base_probabilities = F.softmax(self.valid_action_mask, dim=-1).expand(*state_dimensions(), 5)
 
             kl_divergence = UF.safe_kl_div(base_probabilities, probabilities)
             target_tensors["kl_divergence"] = kl_divergence * self.kl_divergence_penalty + self.gamma * torch.einsum(
@@ -334,8 +331,8 @@ class QMatrix():
     
     def get_reward_and_utility(self, timesteps: int = 100) -> dict[str, float]:
 
-        state = torch.zeros(STATE_DIMENSIONS)
-        state[*INITIAL_STATE_CODE] = 1
+        state = torch.zeros(state_dimensions())
+        state[*initial_state_code()] = 1
 
         action_tensor = self.get_probabilities()
 
@@ -349,6 +346,7 @@ class QMatrix():
             state = self.map_collection.forward(action_probabilities)
 
             for key in return_dict.keys():
-                return_dict[key] += (state * self.tensors[key]).sum().item()
+                result = torch.einsum("...,...->", state, self.tensors[key])
+                return_dict[key] += result.item() / timesteps
 
         return return_dict

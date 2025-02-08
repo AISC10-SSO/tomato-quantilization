@@ -16,7 +16,7 @@ def main():
         save_policy_datapoints(
             datapoints_count=100,
             save_path=f"Random Policy Testing/Data/datapoints_{misspecified_reward_value}_{threshold}.csv",
-            steps=20,
+            steps=100,
             misspecified_reward_value=misspecified_reward_value,
             threshold=threshold)
 
@@ -26,14 +26,12 @@ def save_policy_datapoints(
         misspecified_reward_value: float = 13,
         threshold: float = 0,
         steps: int = 100):
-    
-    """
+
     if os.path.exists(save_path):
         print(f"Skipping {save_path} because it already exists")
         return
     else:
         print(f"Saving {save_path}")
-        """
     
     max_per_step_reward = min(misspecified_reward_value, 13)
     total_reward_threshold = threshold * steps
@@ -42,7 +40,7 @@ def save_policy_datapoints(
     generator = np.random.default_rng(seed=12345)
     
     while(len(datapoints) < datapoints_count):
-        grid = TomatoGrid(misspecified_reward_value=misspecified_reward_value, seed=44)
+        grid = TomatoGrid(misspecified_reward_value=misspecified_reward_value, seed=42, invalid_action_setting="error")
         total_misspecified_reward = 0
         total_true_utility = 0
 
