@@ -60,6 +60,7 @@ def save_policy_datapoints(
                 "true_utility": total_true_utility / steps,
                 "misspecified_reward": total_misspecified_reward / steps
             })
+            print(f"Found {len(datapoints)}/{datapoints_count} datapoints", end="\r")
 
 
     df = pd.DataFrame(datapoints, columns=["true_utility", "misspecified_reward"])

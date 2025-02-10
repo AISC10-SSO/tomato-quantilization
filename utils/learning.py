@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
-import gymnasium as gym
 
 import random
 import logging
@@ -15,34 +14,49 @@ import utils.functions as UF
 
 logger = logging.getLogger(__name__)
 
-class TomatoGridGym(gym.Env):
-    def __init__(self, gridworld_config: dict):
+class TomatoGridWrapper():
+    def __init__(self, config: dict):
+        """
+        Wrapper for the TomatoGrid class, to make it compatible with gymnasium
+        Currently not compatible with gymnasium, as gymnasium seems to be incompatible with python 3.13
+        """
+
         super().__init__()
+        self.gridworld = TomatoGrid(**config)
 
-        self.gridworld = TomatoGrid(**gridworld_config)
-
+        """
         self.action_space = gym.spaces.Discrete(5)
         self.observation_space = gym.spaces.Box(
             low=0,
             high=255,
-            shape=(7, 9, 6),
+            shape=(6, 7, 9),
             dtype=np.uint8
         )
+        """
 
-    def reset(self):
-        self.gridworld.reset()
+    def reset(self, seed: int|None = None, options: dict|None = None):
+        if seed is not None:
+            self.gridworld.seed = seed
+            self.gridworld.reset(reset_rng=True)
+        else:
+            self.gridworld.reset()
 
-        return self.gridworld.get_state_tensor(format="numpy"), {}
+        observation = self.gridworld.get_state_tensor(format="numpy")
+        valid_actions = self.gridworld.get_valid_actions()
+
+        return observation, {"valid_actions": valid_actions}
 
     def step(self, action: int):
+
         self.gridworld.update_grid(list(Action)[action])
 
         observation = self.gridworld.get_state_tensor(format="numpy")
+        valid_actions = self.gridworld.get_valid_actions()
         output = self.gridworld.get_current_utility()
         reward = output["misspecified_reward"]
-        terminated = False
+        terminated = self.gridworld.is_terminal
         truncated = False
-        info = {"true_utility": output["true_utility"]}
+        info = {"true_utility": output["true_utility"], "valid_actions": valid_actions}
 
         # observation, reward, terminated, truncated, info
         return observation, reward, terminated, truncated, info
@@ -53,11 +67,8 @@ class TomatoGridGym(gym.Env):
 
         for row in state:
             print("".join(row))
-    
-gym.register(id="tomato-grid", entry_point="utils.learning:TomatoGridGym")
 
 class QNetwork(nn.Module):
-
     def __init__(
             self, *,
             input_channels: int,
@@ -455,14 +466,15 @@ class QLearning:
 
         self.gridworld_config = gridworld_config
 
+        self.gridworld = TomatoGridWrapper(config=self.gridworld_config)
+
         self.q_agent = QAgent(**q_agent_config)
 
         self.optimizer = torch.optim.AdamW(self.q_agent.parameters(), **adamw_config)
 
         self.outputs = []
 
-    def _get_action_validity(self, gridworld: TomatoGrid):
-        valid_actions = gridworld.get_valid_actions()
+    def _get_action_validity(self, valid_actions: list[Action]):
         action_validity = torch.tensor([action in valid_actions for action in list(Action)])
         return action_validity
     
@@ -470,27 +482,33 @@ class QLearning:
             self,
             steps: int):
         
-        gridworld = TomatoGrid(**self.gridworld_config)
+        observation, info = self.gridworld.reset()
+        action_validity = self._get_action_validity(info["valid_actions"])
 
         for step_idx in tqdm(range(steps)):
-            dict_ = {}
-            
-            state = gridworld.get_state_tensor()
-            dict_["state"] = state
+            dict_ = {
+                "state": torch.tensor(observation).type(torch.float32),
+                "action_validity": action_validity
+            }
 
-            dict_["action_validity"] = self._get_action_validity(gridworld).unsqueeze(0)
+            action_idx = self.q_agent.get_action(
+                state = dict_["state"].unsqueeze(0),
+                action_validity=dict_["action_validity"].unsqueeze(0),
+                mode="sample")
 
-            action_idx = self.q_agent.get_action(state = state.unsqueeze(0), action_validity=dict_["action_validity"], mode="sample")
+            observation, reward, terminal, _, info = self.gridworld.step(action_idx)
+            action_validity = self._get_action_validity(info["valid_actions"])
+
+            dict_["next_state"] = torch.tensor(observation).type(torch.float32)
+            dict_["next_state_action_validity"] = action_validity
             dict_["action"] = torch.tensor(action_idx)
+            dict_["reward"] = torch.tensor(reward)
 
-            action = list(Action)[action_idx]
-            output = gridworld.update_grid(action)
-
-            dict_["next_state"] = gridworld.get_state_tensor()
-            dict_["next_state_action_validity"] = self._get_action_validity(gridworld).unsqueeze(0)
-
-            dict_["reward"] = torch.tensor(output.misspecified_reward)
             self.state_buffer.add(dict_)
+
+            if terminal:
+                observation, info = self.gridworld.reset()
+                action_validity = self._get_action_validity(info["valid_actions"])
 
             if step_idx % 100 == 0 and step_idx > 0 and len(self.state_buffer) > self.config["batch_size"]:
                 for _ in range(10):
@@ -516,25 +534,31 @@ class QLearning:
             if step_idx % 1000 == 0:
                 test_output = self.test_model()
                 self.outputs.append(test_output)
-                """
-                print(test_output)
-                print(f"Average reward: {self.q_agent.average_reward}")
-                print(f"Average kl divergence: {self.q_agent.average_kl_divergence}")
-                """
 
     def test_model(self) -> dict[str, float]:
-        gridworlds = [TomatoGrid(**self.gridworld_config) for _ in range(10)]
+        gridworlds = [TomatoGridWrapper(self.gridworld_config) for _ in range(10)]
 
-        outputs = []
+        output_tuples = [gridworld.reset() for gridworld in gridworlds]
+
+        misspecified_rewards = []
+        true_utilities = []
+
+        state = torch.stack([torch.tensor(output_tuple[0]).type(torch.float32) for output_tuple in output_tuples])
+        action_validity = torch.stack([self._get_action_validity(output_tuple[1]["valid_actions"]) for output_tuple in output_tuples])
 
         for _ in range(100):
-            state = torch.stack([gridworld.get_state_tensor() for gridworld in gridworlds])
-            action_validity = torch.stack([self._get_action_validity(gridworld) for gridworld in gridworlds])
             action_indices = self.q_agent.get_action(state = state, action_validity=action_validity, mode="deploy")
-            actions = [list(Action)[action_idx] for action_idx in action_indices]
-            outputs += [gridworld.update_grid(action) for gridworld, action in zip(gridworlds, actions)]
 
-        misspecified_reward = np.mean([output.misspecified_reward for output in outputs])
-        true_utility = np.mean([output.true_utility for output in outputs])
+            output_tuples = [gridworld.step(action_idx) for gridworld, action_idx in zip(gridworlds, action_indices)]
+
+            state = torch.stack([torch.tensor(output_tuple[0]).type(torch.float32) for output_tuple in output_tuples])
+            action_validity = torch.stack([self._get_action_validity(output_tuple[-1]["valid_actions"]) for output_tuple in output_tuples])
+
+            misspecified_rewards += [output_tuple[1] for output_tuple in output_tuples]
+            true_utilities += [output_tuple[-1]["true_utility"] for output_tuple in output_tuples]
+
+
+        misspecified_reward = np.mean(misspecified_rewards)
+        true_utility = np.mean(true_utilities)
 
         return {"misspecified_reward": misspecified_reward, "true_utility": true_utility}

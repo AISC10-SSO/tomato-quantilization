@@ -25,3 +25,14 @@ We are able to solve this through backward iteration on the Bellman equation.
 
 We find that our attempts at capped soft Q-learning achieve better success than soft Q-learning,
 though they compare poorly to a baseline of ideal performance.
+
+# Random Policy Testing
+
+Here we sample random action sequences from the set \{UP, DOWN, LEFT, RIGHT, WAIT\} and calculate the utility and misspecified reward.
+We can threshold these by misspecified reward, then calculate the average reward and utility at each threshold.
+These results are worse than the local quantilization algorithm.
+
+# Q-Learning
+
+Here we use a deep Q-learning algorithm to learn a policy based on SGD on finite data.
+We aim to reproduce the performance of the Q-matrix solving system.

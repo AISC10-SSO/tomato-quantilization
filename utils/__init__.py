@@ -62,6 +62,7 @@ class TomatoGrid:
             self.tomato_updates[location[0], location[1], :] = updates
 
         self.time_step = 0
+        self.is_terminal = False
         self.agent_position = (3,3)
 
     def get_tomato_updates(self, time_step: int) -> tuple[int, int] | None:
@@ -117,6 +118,9 @@ class TomatoGrid:
 
         self.time_step += 1
 
+        if self.time_step >= self.max_time_steps:
+            self.is_terminal = True
+
         utility_output = self.get_current_utility()
 
         return TomatoGridStepOutput(
@@ -153,15 +157,7 @@ class TomatoGrid:
         agent (A)
         """
 
-        if format == "torch":
-            output = torch.zeros(
-                (len(self.grid_state), len(self.grid_state[0]), 6)
-            )
-        else:
-            output = np.zeros(
-                (len(self.grid_state), len(self.grid_state[0]), 6),
-                dtype=np.int8
-            )
+        output = np.zeros((6, len(self.grid_state), len(self.grid_state[0])), dtype=np.uint8)
 
         channel_map = {
             "X": 0,
@@ -171,11 +167,13 @@ class TomatoGrid:
             "_": 4
         }
 
-        for i, row in enumerate(self.grid_state):
-            for j, cell in enumerate(row):
-                output[i, j, channel_map[cell]] = 1
+        for character, channel in channel_map.items():
+            output[channel, :, :] = (self.grid_state == character)
 
-        output[self.agent_position[0], self.agent_position[1], 5] = 1
+        output[5, self.agent_position[0], self.agent_position[1]] = 1
+
+        if format == "torch":
+            output = torch.tensor(output, dtype=torch.float32)
 
         return output
 

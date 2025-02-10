@@ -6,13 +6,23 @@ import pandas as pd
 from itertools import chain, product
 from typing import Literal
 import os
-from tqdm import tqdm
-import gymnasium as gym
 
 def main():
     torch.set_default_device(device)
 
-    env = gym.make("tomato-grid")
+    run_test(
+        repeats=1,
+        save_path="q_learning_test.csv",
+        fixed_kwargs={
+            "gamma": 0.99,
+            "t_inv_train_deploy": 5/13,
+            "t_inv_sample": "auto",
+            "q_cap": 100,
+            "kl_divergence_coefficient": 1,
+        },
+        variable_kwargs={},
+        variable_kwarg_gather_type="product"
+    )
 
 
 def run_test(
