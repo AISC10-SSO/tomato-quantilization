@@ -68,29 +68,51 @@ class TomatoGridWrapper():
         for row in state:
             print("".join(row))
 
+class ResidualConvLayer(nn.Module):
+    def __init__(self, input_channels: int, output_channels: int, kernel_size: int = 3, stride: int = 1):
+        super().__init__()
+
+        self.conv = nn.Conv2d(input_channels, output_channels, kernel_size=kernel_size, stride=stride)
+        self.bn = nn.BatchNorm2d(output_channels)
+
+        self.linear = nn.Linear(input_channels, output_channels)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        residual = x.mean(dim=(-2,-1))
+
+        return F.relu(self.bn(self.conv(x))) + self.linear(residual).unsqueeze(-1).unsqueeze(-1)
+    
+class ResidualFeedForwardLayer(nn.Module):
+    def __init__(self, residual_dim: int, feedforward_dim: int):
+        super().__init__()
+
+        self.W_up = nn.Linear(residual_dim, feedforward_dim)
+        self.W_down = nn.Linear(feedforward_dim, residual_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.W_down(F.relu(self.W_up(x))) + x
+
 class QNetwork(nn.Module):
     def __init__(
             self, *,
             input_channels: int,
             action_size: int,
             model_kl: bool = False,
-            network_widths: tuple[int, int, int] = (16, 32, 64)):
+            network_widths: tuple[int, int] = (16, 32)):
         """
         Convolutional Q Network for the tomato gridworld
         """
         super().__init__()
 
-        self.conv1 = nn.Conv2d(input_channels, network_widths[0], kernel_size=3, stride=1)
-        self.bn1 = nn.BatchNorm2d(network_widths[0])
-        self.conv2 = nn.Conv2d(network_widths[0], network_widths[1], kernel_size=3, stride=1)
-        self.bn2 = nn.BatchNorm2d(network_widths[1])
-        self.fc1 = nn.Linear(network_widths[1], network_widths[2])
-        self.fc_q = nn.Linear(network_widths[2], action_size)
+        self.conv1 = ResidualConvLayer(input_channels, network_widths[0])
+        self.conv2 = ResidualConvLayer(network_widths[0], network_widths[1])
+        self.feedforward = ResidualFeedForwardLayer(network_widths[1], network_widths[1] * 4)
 
+        self.fc_q = nn.Linear(network_widths[1], action_size)
         self.model_kl = model_kl
 
         if self.model_kl:
-            self.fc_kl = nn.Linear(network_widths[2], action_size)
+            self.fc_kl = nn.Linear(network_widths[1], action_size)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -102,11 +124,13 @@ class QNetwork(nn.Module):
         Returns:
             torch.Tensor: Output tensor of shape (batch_size, action_size)
         """
-        x = F.relu(self.bn1(self.conv1(x)))
-        x = F.relu(self.bn2(self.conv2(x)))
+
+        x = self.conv1(x)
+        x = self.conv2(x)
+
         x = x.mean(dim=(-2,-1))
 
-        x = F.relu(self.fc1(x))
+        x = self.feedforward(x)
 
         output = {"q_reward": self.fc_q(x)}
 
@@ -121,15 +145,15 @@ class QAgent(nn.Module):
             self, *,
             input_channels: int = 6,
             action_size: int = 5,
-            gamma: float = 1.99,
+            gamma: float = 0.99,
             kl_divergence_coefficient: float|None|Literal["auto"] = None,
             t_inv_sample: float|None|Literal["auto"] = None,
             t_inv_deploy: float|None = None,
             reward_cap: float|None = None,
             q_cap: float|None = None,
             variable_t_inv: bool = False,
-            double_network: bool = False,
-            network_widths: tuple[int, int, int] = (16, 32, 64)):
+            double_network: bool = True,
+            network_widths: tuple[int, int] = (32, 64)):
     
         super().__init__()
 
@@ -377,11 +401,6 @@ class QAgent(nn.Module):
         average_q = (self.average_reward or 0) / (1-self.gamma)
         adjusted_q_outputs = outputs["q_reward"] + average_q
 
-        if self.print_info:
-            print(f"Average q: {average_q}")
-            print(f"Average non-adjusted output: {outputs['q'].mean()}")
-            print(f"Average output: {adjusted_q_outputs.mean()}")
-
         # Apply temperature scaling if t_inv is provided
         if t_inv is None:
             # If no t_inv, use argmax
@@ -404,10 +423,12 @@ class QAgent(nn.Module):
     
 
     def update_average_reward(self, new_reward: float, tau: float = 0.5):
-        self.average_reward = new_reward if self.average_reward == 0 else self.average_reward * (1-tau) + new_reward * tau
+        # self.average_reward = new_reward if self.average_reward == 0 else self.average_reward * (1-tau) + new_reward * tau
+        pass
     
     def update_average_kl_divergence(self, new_kl_divergence: float, tau: float = 0.5):
-        self.average_kl_divergence = new_kl_divergence if self.average_kl_divergence == 0 else self.average_kl_divergence * (1-tau) + new_kl_divergence * tau
+        # self.average_kl_divergence = new_kl_divergence if self.average_kl_divergence == 0 else self.average_kl_divergence * (1-tau) + new_kl_divergence * tau
+        pass
 
     def get_kl_divergence_coefficient(self):
         if self.kl_divergence_coefficient is None:
@@ -480,7 +501,11 @@ class QLearning:
     
     def train(
             self,
-            steps: int):
+            steps: int,
+            update_interval: int = 100,
+            test_interval: int = 1000):
+        
+        self.gradient_descent_steps = 0
         
         observation, info = self.gridworld.reset()
         action_validity = self._get_action_validity(info["valid_actions"])
@@ -510,33 +535,37 @@ class QLearning:
                 observation, info = self.gridworld.reset()
                 action_validity = self._get_action_validity(info["valid_actions"])
 
-            if step_idx % 100 == 0 and step_idx > 0 and len(self.state_buffer) > self.config["batch_size"]:
-                for _ in range(10):
+            if step_idx % update_interval == 0 and step_idx > 0 and len(self.state_buffer) > self.config["batch_size"]:
+                for _ in range(update_interval):
                     loss_output = self.q_agent.get_loss(self.state_buffer.get_batch())
 
                     self.optimizer.zero_grad()
                     loss = loss_output["loss"]
 
+                    """
                     if self.config["kl_divergence_target"] is not None:
                         kl_divergence = loss_output["kl_divergence"]
                         kl_divergence_loss = F.smooth_l1_loss(
                             kl_divergence.mean() / self.config["kl_divergence_target"], torch.tensor(1))
                         loss += kl_divergence_loss
+                    """
 
                     loss.backward()
 
                     nn.utils.clip_grad_norm_(self.q_agent.parameters(), max_norm=1.0)
 
                     self.optimizer.step()
+
+                    self.gradient_descent_steps += 1
                 
                     self.q_agent.update_target_networks(tau=0.01)
 
-            if step_idx % 1000 == 0:
+            if step_idx % test_interval == 0:
                 test_output = self.test_model()
                 self.outputs.append(test_output)
 
     def test_model(self) -> dict[str, float]:
-        gridworlds = [TomatoGridWrapper(self.gridworld_config) for _ in range(10)]
+        gridworlds = [TomatoGridWrapper(self.gridworld_config) for _ in range(25)]
 
         output_tuples = [gridworld.reset() for gridworld in gridworlds]
 
@@ -557,8 +586,7 @@ class QLearning:
             misspecified_rewards += [output_tuple[1] for output_tuple in output_tuples]
             true_utilities += [output_tuple[-1]["true_utility"] for output_tuple in output_tuples]
 
-
         misspecified_reward = np.mean(misspecified_rewards)
         true_utility = np.mean(true_utilities)
 
-        return {"misspecified_reward": misspecified_reward, "true_utility": true_utility}
+        return {"step": self.gradient_descent_steps, "misspecified_reward": misspecified_reward, "true_utility": true_utility}

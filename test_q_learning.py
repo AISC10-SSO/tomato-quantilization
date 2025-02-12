@@ -7,21 +7,20 @@ from itertools import chain, product
 from typing import Literal
 import os
 
+import seaborn as sns
+import matplotlib.pyplot as plt
+
 def main():
     torch.set_default_device(device)
 
     run_test(
         repeats=1,
-        save_path="q_learning_test.csv",
+        save_path="Q Learning/Data/boltzmann_sampling.csv",
         fixed_kwargs={
-            "gamma": 0.99,
-            "t_inv_train_deploy": 5/13,
-            "t_inv_sample": "auto",
-            "q_cap": 100,
-            "kl_divergence_coefficient": 1,
+            "t_inv_train_deploy":  2/13,
         },
-        variable_kwargs={},
-        variable_kwarg_gather_type="product"
+        variable_kwargs={
+        },
     )
 
 
@@ -51,7 +50,7 @@ def run_test(
         for key, value in fixed_kwargs.items():
             kwargs[key] = value
 
-        df_out, config_dict = test_q_learning(runs=repeats, **kwargs)
+        df_out, config_dict = test_q_learning(**kwargs)
 
         processed_df = process_df(df_out, config_dict)
 
@@ -74,47 +73,44 @@ def process_df(df_out, config_dict):
 
 def test_q_learning(
         t_inv_train_deploy: float|None = None,
-        t_inv_sample: float|None = None,
-        gamma: float|None = None,
-        reward_cap: float|None = None,
+        t_inv_sample: float|None|Literal["auto"] = "auto",
+        gamma: float|None = 0.99,
         q_cap: float|None = None,
-        runs: int = 10,
         steps: int = 100_000,
         kl_divergence_coefficient: float|None = None,
-        kl_divergence_target: float|None = None,
         misspecified_reward_value: float = 13
 ):
 
     config = {
-        "buffer_size": 1_000_000,
+        "buffer_size": 100_000,
         "batch_size": 1024,
-        "kl_divergence_target": kl_divergence_target
     }
     adamw_config = {
         "lr": 2e-3,
-        "weight_decay": 1e-5
+        "weight_decay": 1e-2
     }
     q_agent_config = {
         "gamma": gamma,
-        "reward_cap": reward_cap,
         "t_inv_sample": t_inv_sample,
         "t_inv_deploy": t_inv_train_deploy,
         "kl_divergence_coefficient": kl_divergence_coefficient,
-        "variable_t_inv": config["kl_divergence_target"] is not None,
         "q_cap": q_cap
     }
     gridworld_config = {
         "misspecified_reward_value": misspecified_reward_value
     }
 
-    outputs = []
-    for _ in range(runs):
-        q_learning = QLearning(config=config, adamw_config=adamw_config, q_agent_config=q_agent_config, gridworld_config=gridworld_config)
-        q_learning.train(steps=steps)
 
-        outputs.append(q_learning.outputs[-1])
 
-    output_df = pd.DataFrame(outputs)
+    q_learning = QLearning(config=config, adamw_config=adamw_config, q_agent_config=q_agent_config, gridworld_config=gridworld_config)
+    q_learning.train(steps=steps)
+
+    output_df = pd.DataFrame(q_learning.outputs)
+
+    sns.lineplot(data=output_df, x="step", y="misspecified_reward")
+    sns.lineplot(data=output_df, x="step", y="true_utility")
+    plt.show()
+    plt.clf()
 
     config_dict = dict(chain(config.items(), q_agent_config.items(), gridworld_config.items()))
 
